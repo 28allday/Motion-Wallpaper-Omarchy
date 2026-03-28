@@ -90,7 +90,9 @@ zen_question() {
 if pgrep -x mpvpaper >/dev/null 2>&1; then
   if zen_question "Motion wallpaper is currently running.\n\nDo you want to stop it and return to your normal wallpaper?"; then
     pkill mpvpaper || true
-    zen_info "Motion wallpaper stopped."
+    # Restart hyprpaper/swaybg so the normal wallpaper comes back
+    hyprctl dispatch exec hyprpaper >/dev/null 2>&1 || true
+    zen_info "Motion wallpaper stopped.\nNormal wallpaper restored."
   fi
   exit 0
 fi
@@ -162,7 +164,15 @@ if [ ! -f "$VIDEO" ]; then
   exit 1
 fi
 
-# 2e) Start mpvpaper
+# 2e) Stop existing wallpaper daemons so mpvpaper is visible
+# Omarchy runs hyprpaper (and sometimes swaybg) which render on the same
+# background layer as mpvpaper. They must be stopped or mpvpaper will be
+# hidden behind them.
+pkill -x hyprpaper 2>/dev/null || true
+pkill -x swaybg 2>/dev/null || true
+sleep 0.3
+
+# 2f) Start mpvpaper
 nohup mpvpaper -o "--loop --no-audio --vo=gpu --profile=high-quality --keep-open=yes" \
   "$SELECTED_MON" "$VIDEO" >/dev/null 2>&1 &
 
@@ -213,7 +223,10 @@ else
 fi
 
 echo
-echo "Optional Hyprland keybind (add to your hyprland.conf):"
+echo "Optional Hyprland keybind (add to ~/.config/hypr/bindings.conf):"
 echo
-echo "  bind = SUPER, W, exec, ~/.local/bin/motion-wallpaper-toggle"
+echo "  NOTE: SUPER+W is already bound to 'Close window' in Omarchy."
+echo "  Use a different keybind to avoid conflicts, for example:"
+echo
+echo "  bind = SUPER ALT, W, exec, ~/.local/bin/motion-wallpaper-toggle"
 echo
