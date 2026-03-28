@@ -1,5 +1,7 @@
 # Motion Wallpaper - Omarchy
 
+[![Video Title](https://img.youtube.com/vi/GpdS_jyW9kU/maxresdefault.jpg)](https://youtu.be/GpdS_jyW9kU)
+
 Animated video wallpapers for [Omarchy](https://omarchy.com) (Arch Linux + Hyprland).
 
 Uses [mpvpaper](https://github.com/GhostNaN/mpvpaper) to play any video file as your desktop wallpaper, with a simple toggle to switch between video and your normal static wallpaper.
