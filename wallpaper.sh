@@ -1,23 +1,59 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# Motion Wallpaper Installer for Omarchy / Hyprland
+#
+# This script sets up animated video wallpapers on an Omarchy (Arch Linux +
+# Hyprland) desktop. It uses mpvpaper, which is a Wayland wallpaper program
+# that plays a video file on the desktop background layer using mpv.
+#
+# What this installer does:
+#   1. Installs dependencies (mpv, jq, zenity, mpvpaper)
+#   2. Creates a toggle script at ~/.local/bin/motion-wallpaper-toggle
+#   3. Creates a .desktop entry so it appears in your app launcher
+#
+# The toggle script works as an on/off switch:
+#   - If no video wallpaper is running: opens a file picker, starts playback
+#   - If a video wallpaper IS running: stops it, restores normal wallpaper
+#
+# Dependencies:
+#   - mpv:       Video player engine (does the actual video decoding/rendering)
+#   - mpvpaper:  Wayland-native wallpaper daemon that uses mpv as its backend
+#                (AUR package — renders video on the wl_surface background layer)
+#   - jq:        JSON parser — used to read monitor info from hyprctl
+#   - zenity:    GTK dialog toolkit — provides the file picker and confirmation
+#                dialogs so the script works without a terminal
+#   - hyprctl:   Hyprland's CLI tool — used to detect connected monitors
+#                (comes with Hyprland, no separate install needed)
+# ==============================================================================
+
 set -euo pipefail
 
 echo "=== Motion wallpaper installer for Omarchy / Hyprland ==="
 
-# 1) Check for required commands
+# Sanity check — this script uses pacman for package installation, so it
+# only works on Arch-based systems. Omarchy is built on Arch Linux.
 if ! command -v pacman >/dev/null 2>&1; then
   echo "This script expects a pacman-based system (Arch/Omarchy). Aborting."
   exit 1
 fi
 
-# 2) Install required packages from official repos
+# Install core dependencies from the official Arch repos.
+# --needed skips packages that are already installed, so this is safe
+# to run multiple times without reinstalling anything unnecessarily.
+#   - mpv: the video player that mpvpaper uses under the hood
+#   - jq: parses the JSON output from "hyprctl monitors -j"
+#   - zenity: provides GUI dialogs (file picker, yes/no prompts)
 echo "Installing required packages: mpv jq zenity"
 sudo pacman -S --needed mpv jq zenity
 
-# 3) Install mpvpaper from AUR
+# Install mpvpaper from the AUR (Arch User Repository).
+# mpvpaper is not in the official repos because it's a smaller community
+# project. It needs an AUR helper (yay or paru) to build and install.
 echo
 echo "Installing mpvpaper from AUR..."
 
-# Check for AUR helper
+# Look for an AUR helper — yay and paru are the two most common ones.
+# Omarchy ships with yay by default.
 AUR_HELPER=""
 if command -v yay >/dev/null 2>&1; then
   AUR_HELPER="yay"
@@ -43,23 +79,32 @@ else
   read -p "Press Enter after installing mpvpaper to continue..."
 fi
 
-# Verify mpvpaper is installed
+# Final check — if mpvpaper still isn't installed at this point (e.g. user
+# skipped the AUR step or the build failed), we can't continue because the
+# toggle script depends on it.
 if ! command -v mpvpaper >/dev/null 2>&1; then
   echo "ERROR: mpvpaper is not installed. Cannot continue."
   exit 1
 fi
 
-# 4) Create ~/.local/bin if it doesn't exist
+# Create the directory for user scripts. ~/.local/bin is the standard
+# location for user-installed scripts on Linux (follows the XDG spec).
 mkdir -p "$HOME/.local/bin"
 
-# 5) Create the toggle script
+# Create the toggle script — this is the main script users interact with.
+# It's a self-contained on/off switch for video wallpapers.
+# When toggled ON:  picks a video file via GUI, stops hyprpaper, starts mpvpaper
+# When toggled OFF: stops mpvpaper, restarts hyprpaper to restore normal wallpaper
 cat << 'EOF' > "$HOME/.local/bin/motion-wallpaper-toggle"
 #!/usr/bin/env bash
 set -euo pipefail
 
 APP_NAME="Motion Wallpaper"
 
-# Helper to show an error dialog (falls back to echo)
+# Zenity helper functions — these wrap zenity dialogs so the script can
+# show GUI pop-ups for errors, info, and yes/no questions. If zenity isn't
+# available (shouldn't happen since we install it), they fall back to
+# plain text output in the terminal.
 zen_err() {
   if command -v zenity >/dev/null 2>&1; then
     zenity --error --title="$APP_NAME" --text="$1" || true
@@ -86,7 +131,9 @@ zen_question() {
   fi
 }
 
-# 1) If mpvpaper is already running, offer to stop it (toggle OFF)
+# Toggle logic — check if mpvpaper is already running.
+# If it is, this is a "toggle OFF" action: stop the video wallpaper
+# and bring back the normal static wallpaper by restarting hyprpaper.
 if pgrep -x mpvpaper >/dev/null 2>&1; then
   if zen_question "Motion wallpaper is currently running.\n\nDo you want to stop it and return to your normal wallpaper?"; then
     pkill mpvpaper || true
@@ -97,15 +144,21 @@ if pgrep -x mpvpaper >/dev/null 2>&1; then
   exit 0
 fi
 
-# 2) No mpvpaper → toggle ON
+# If we get here, mpvpaper is NOT running — this is a "toggle ON" action.
+# We need to: detect monitors → let user pick one → let user pick a video
+# → stop hyprpaper → start mpvpaper.
 
-# 2a) Check hyprctl
+# Make sure we're actually running inside Hyprland — hyprctl is how we
+# talk to the compositor to find out which monitors are connected.
 if ! command -v hyprctl >/dev/null 2>&1; then
   zen_err "hyprctl not found. Are you running Hyprland?"
   exit 1
 fi
 
-# 2b) Get monitor list
+# Get monitor list from Hyprland as JSON. The -j flag outputs structured
+# JSON data which we parse with jq to extract monitor names (e.g. HDMI-A-1,
+# DP-1, eDP-1). mpvpaper needs the exact monitor name to know where to
+# render the wallpaper.
 MON_JSON="$(hyprctl monitors -j 2>/dev/null || true)"
 if [ -z "$MON_JSON" ]; then
   zen_err "Could not get monitor info from hyprctl."
@@ -125,7 +178,9 @@ fi
 
 MON_COUNT="$(printf '%s\n' "$MONITORS" | wc -l)"
 
-# 2c) Choose monitor (if more than one)
+# If there's only one monitor, use it automatically. If there are multiple
+# monitors, show a selection dialog so the user can pick which one gets
+# the video wallpaper.
 SELECTED_MON=""
 if [ "$MON_COUNT" -eq 1 ]; then
   SELECTED_MON="$MONITORS"
@@ -144,7 +199,8 @@ if [ -z "${SELECTED_MON:-}" ]; then
   exit 0
 fi
 
-# 2d) Choose video file
+# Open a file picker dialog for the user to choose their video wallpaper.
+# Filters to common video formats. If the user clicks Cancel, exit cleanly.
 if ! command -v zenity >/dev/null 2>&1; then
   zen_err "Zenity is not installed but is required for file selection."
   exit 1
@@ -172,7 +228,15 @@ pkill -x hyprpaper 2>/dev/null || true
 pkill -x swaybg 2>/dev/null || true
 sleep 0.3
 
-# 2f) Start mpvpaper
+# Start mpvpaper with optimised playback settings:
+#   --loop:            Loop the video forever (it's a wallpaper, not a movie)
+#   --no-audio:        Don't play audio (you don't want wallpaper sounds)
+#   --vo=gpu:          Use GPU-accelerated rendering for minimal CPU usage
+#   --profile=high-quality: Use mpv's high quality rendering profile
+#   --keep-open=yes:   Keep the window open when video reaches end (before loop)
+#
+# nohup + & runs it in the background detached from the terminal, so
+# closing the terminal won't kill the wallpaper.
 nohup mpvpaper -o "--loop --no-audio --vo=gpu --profile=high-quality --keep-open=yes" \
   "$SELECTED_MON" "$VIDEO" >/dev/null 2>&1 &
 
@@ -181,7 +245,10 @@ EOF
 
 chmod +x "$HOME/.local/bin/motion-wallpaper-toggle"
 
-# 6) Create desktop entry for app menu
+# Create a .desktop entry so "Motion Wallpaper" appears in app launchers
+# (Walker, Elephant, etc.). This follows the freedesktop.org Desktop Entry
+# spec. The Categories and Keywords fields help the launcher index it
+# properly so users can find it by searching "wallpaper", "video", etc.
 mkdir -p "$HOME/.local/share/applications"
 
 cat << EOF > "$HOME/.local/share/applications/motion-wallpaper-toggle.desktop"
@@ -203,7 +270,9 @@ echo
 echo "✓ Motion Wallpaper has been added to your application menu"
 echo "  Search for 'Motion Wallpaper' in your app launcher"
 
-# Check if ~/.local/bin is in PATH
+# Check if ~/.local/bin is in PATH — if it's not, the user won't be able
+# to run "motion-wallpaper-toggle" directly from the terminal. The .desktop
+# entry uses the full path so the app launcher will always work regardless.
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
   echo
   echo "⚠️  NOTE: ~/.local/bin is not in your PATH."
