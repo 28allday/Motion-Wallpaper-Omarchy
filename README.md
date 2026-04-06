@@ -9,7 +9,7 @@ Uses [mpvpaper](https://github.com/GhostNaN/mpvpaper) to play any video file as 
 ## Quick Start
 
 ```bash
-git clone https://github.com/28allday/Motion-Wallpaper-Omarchy.git
+git clone https://git.no-signal.uk/nosignal/Motion-Wallpaper-Omarchy.git
 cd Motion-Wallpaper-Omarchy
 chmod +x wallpaper.sh
 ./wallpaper.sh
