@@ -92,10 +92,19 @@ load_state() {
   LAST_VIDEO=""
   LAST_TARGET=""
   LAST_DIR=""
-  if [ -f "$STATE_FILE" ]; then
-    # shellcheck source=/dev/null
-    source "$STATE_FILE"
-  fi
+  [ -f "$STATE_FILE" ] || return 0
+  # Parse KEY="VALUE" lines directly instead of `source`, so a maliciously
+  # crafted video path (e.g. containing `";rm -rf …`) can't execute.
+  local key val
+  while IFS='=' read -r key val; do
+    val="${val#\"}"
+    val="${val%\"}"
+    case "$key" in
+      LAST_VIDEO)  LAST_VIDEO="$val"  ;;
+      LAST_TARGET) LAST_TARGET="$val" ;;
+      LAST_DIR)    LAST_DIR="$val"    ;;
+    esac
+  done < "$STATE_FILE"
 }
 
 save_state() {
@@ -103,11 +112,14 @@ save_state() {
   # so the filesystem browser re-opens where the user last landed.
   local dir="${3:-$(dirname "$1")}"
   umask 077
-  cat > "$STATE_FILE" <<STATE
+  # Atomic write: avoids leaving a truncated file if the process dies mid-cat.
+  local tmp="$STATE_FILE.tmp"
+  cat > "$tmp" <<STATE
 LAST_VIDEO="$1"
 LAST_TARGET="$2"
 LAST_DIR="$dir"
 STATE
+  mv -f "$tmp" "$STATE_FILE"
 }
 
 is_running() {
@@ -129,8 +141,12 @@ autostart_enable() {
     tui_err "motion-wallpaper.service is not installed. Re-run wallpaper.sh."
     return 1
   fi
-  systemctl --user enable motion-wallpaper.service >/dev/null 2>&1
+  if ! systemctl --user enable motion-wallpaper.service >/dev/null 2>&1; then
+    tui_err "Failed to enable autostart (systemctl error)."
+    return 1
+  fi
   log "autostart enabled"
+  return 0
 }
 
 autostart_disable() {
@@ -281,6 +297,14 @@ start_watcher() {
 restore_static_wallpaper() {
   local omarchy_bg="$HOME/.config/omarchy/current/background"
   if [ -e "$omarchy_bg" ]; then
+    # Stop may be called twice in quick succession when the TUI stops the
+    # wallpaper and systemd's ExecStop fires right after. Skip if someone
+    # else already put swaybg back so we don't kill-and-respawn (causes a
+    # visible flicker).
+    if pgrep -x swaybg >/dev/null 2>&1 && ! pgrep -x mpvpaper >/dev/null 2>&1; then
+      log "swaybg already running, skipping restore"
+      return 0
+    fi
     pkill -x hyprpaper 2>/dev/null || true
     pkill -x swaybg    2>/dev/null || true
     if command -v uwsm-app >/dev/null 2>&1; then
@@ -338,13 +362,18 @@ start_mpvpaper_bg() {
 }
 
 stop_mpvpaper() {
-  kill_watcher
-  pkill -x mpvpaper 2>/dev/null || true
-  # mpv cleans up the IPC socket on exit, but if we killed mpvpaper hard
-  # the dangling socket can linger and confuse the next run.
-  rm -f "$MPV_IPC_SOCK" 2>/dev/null || true
-  restore_static_wallpaper
-  log "stopped"
+  # Serialize stops so the TUI-initiated path and systemd's ExecStop (which
+  # fires when the TUI kills mpvpaper) can't both be mid-restore at once.
+  # `flock -n` → second caller skips cleanly if the first still holds it.
+  (
+    flock -n 9 || { log "stop already in progress, skipping"; exit 0; }
+    kill_watcher
+    pkill -x mpvpaper 2>/dev/null || true
+    # mpv cleans up its IPC socket on exit; a hard kill can leave it dangling.
+    rm -f "$MPV_IPC_SOCK" 2>/dev/null || true
+    restore_static_wallpaper
+    log "stopped"
+  ) 9>"$STATE_DIR/.stop.lock"
 }
 
 # ===== actions ================================================================
@@ -370,6 +399,14 @@ action_toggle() {
         stop_mpvpaper
         tui_ok "Stopped. Normal wallpaper restored."
         notify "Motion wallpaper stopped."
+        # If autostart is on, a plain stop will let the wallpaper return on
+        # next reboot. Offer to turn autostart off so "stop" means "stop".
+        if autostart_enabled; then
+          if gum confirm "Autostart is still enabled — also disable it so the wallpaper doesn't resume after reboot?"; then
+            autostart_disable
+            tui_ok "Autostart disabled."
+          fi
+        fi
         ;;
       "Change video")
         load_state
@@ -388,6 +425,15 @@ action_toggle() {
       "Turn autostart OFF")
         autostart_disable
         tui_ok "Autostart disabled."
+        # Motion wallpaper is still running at this point. Offer to also stop
+        # it now so the label "turn off" matches visible behaviour.
+        if is_running; then
+          if gum confirm "Motion wallpaper is still running — stop it now too?"; then
+            stop_mpvpaper
+            tui_ok "Stopped. Normal wallpaper restored."
+            notify "Motion wallpaper stopped."
+          fi
+        fi
         ;;
       Cancel) exit 0 ;;
     esac

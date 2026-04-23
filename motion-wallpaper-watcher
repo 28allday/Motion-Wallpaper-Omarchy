@@ -47,9 +47,25 @@ resume_mpv() { send_mpv '{ "command": ["set_property", "pause", false] }'; }
 
 log "watching $HYPR_SOCK"
 
+# Kill socat child on exit so it doesn't spam "Broken pipe" to the log when
+# the watcher is killed by the main toggle script.
+cleanup() {
+  # `[ ] && kill` short-circuits to non-zero when SOCAT_PID is unset, which
+  # under `set -e` would abort the trap before `exit 0` — wrap safely.
+  if [ -n "${SOCAT_PID:-}" ]; then
+    kill "$SOCAT_PID" 2>/dev/null || true
+  fi
+  exit 0
+}
+trap cleanup EXIT INT TERM
+
 # Hyprland socket2 emits newline-separated "EVENT>>DATA" lines. We only care
 # about the fullscreen state. `fullscreen>>1` = entered, `fullscreen>>0` = left.
-socat -u "UNIX-CONNECT:$HYPR_SOCK" - | while IFS= read -r line; do
+# socat stderr is dropped so EPIPE on shutdown doesn't bloat the log.
+coproc SOCAT { socat -u "UNIX-CONNECT:$HYPR_SOCK" - 2>/dev/null; }
+# Bash auto-exports SOCAT_PID from `coproc SOCAT`; used in cleanup trap.
+
+while IFS= read -r line <&"${SOCAT[0]}"; do
   case "$line" in
     fullscreen\>\>1)
       log "fullscreen entered — pause"
