@@ -20,15 +20,16 @@ log() {
   printf '[%s] watcher: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
 }
 
-if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
-  # Recover the signature from `hyprctl instances` — same trick the toggle
-  # script uses when launched from an env that didn't inherit HIS.
+his="${HYPRLAND_INSTANCE_SIGNATURE:-}"
+if [ -z "$his" ] || [ ! -d "$RUNTIME_DIR/hypr/$his" ]; then
+  # HIS is missing or stale (points to a dead session). Recover from the
+  # live signature reported by `hyprctl instances`.
   sig="$(hyprctl instances 2>/dev/null | awk '/^instance /{sub(/:$/,"",$2); print $2; exit}')"
   if [ -n "$sig" ]; then
     export HYPRLAND_INSTANCE_SIGNATURE="$sig"
-    log "recovered HYPRLAND_INSTANCE_SIGNATURE=$sig from hyprctl instances"
+    log "using HYPRLAND_INSTANCE_SIGNATURE=$sig (was: ${his:-unset})"
   else
-    log "HYPRLAND_INSTANCE_SIGNATURE not set and no instance found — exiting"
+    log "HYPRLAND_INSTANCE_SIGNATURE not usable and no live instance found — exiting"
     exit 0
   fi
 fi

@@ -182,19 +182,28 @@ show_header() {
 # ===== selection ==============================================================
 
 ensure_hyprland_env() {
-  # The TUI can be launched from contexts whose env doesn't carry
-  # HYPRLAND_INSTANCE_SIGNATURE (XDG launchers, cron, ssh). `hyprctl instances`
-  # still works in that case and prints the running signatures, so recover by
-  # picking the first one. If we can't, leave HIS unset and let the caller
-  # surface a friendly error.
-  if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+  # The TUI can be launched from contexts whose env doesn't carry a valid
+  # HYPRLAND_INSTANCE_SIGNATURE. Two failure modes:
+  #   1) HIS unset (fresh login shell from a non-graphical context)
+  #   2) HIS set but STALE — points to a previous Hyprland session whose
+  #      socket no longer exists (seen when Walker's env carries the
+  #      signature from an earlier login). The second case is silent but
+  #      equally broken: hyprctl dumps a plain-text error on stdout.
+  # `hyprctl instances` always reports the *live* signatures, so recover
+  # from that. Leave HIS unchanged if we can't find a live instance.
+  local his="${HYPRLAND_INSTANCE_SIGNATURE:-}"
+  if [ -n "$his" ] && [ -d "$RUNTIME_DIR/hypr/$his" ]; then
     return 0
   fi
   local sig
   sig="$(hyprctl instances 2>/dev/null | awk '/^instance /{sub(/:$/,"",$2); print $2; exit}')"
-  if [ -n "$sig" ]; then
+  if [ -n "$sig" ] && [ "$sig" != "$his" ]; then
     export HYPRLAND_INSTANCE_SIGNATURE="$sig"
-    log "recovered HYPRLAND_INSTANCE_SIGNATURE=$sig from hyprctl instances"
+    if [ -n "$his" ]; then
+      log "replaced stale HYPRLAND_INSTANCE_SIGNATURE ($his → $sig)"
+    else
+      log "recovered HYPRLAND_INSTANCE_SIGNATURE=$sig from hyprctl instances"
+    fi
   fi
 }
 
