@@ -3,14 +3,15 @@
 # Motion Wallpaper Installer for Omarchy / Hyprland
 #
 # Installs:
-#   ~/.local/bin/motion-wallpaper-toggle             runtime script
+#   ~/.local/bin/motion-wallpaper-toggle              runtime TUI
+#   ~/.local/bin/motion-wallpaper-watcher             auto-pause watcher
 #   ~/.local/share/applications/motion-wallpaper-toggle.desktop   app entry
-#   ~/.config/systemd/user/motion-wallpaper.service  optional autostart unit
+#   ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg   icon
+#   ~/.config/systemd/user/motion-wallpaper.service   optional autostart unit
 #
 # Dependencies:
-#   mpv, jq, zenity (pacman)
+#   mpv, jq, gum, socat, libnotify (pacman)
 #   mpvpaper (AUR, via yay or paru)
-#   libnotify (pacman) — optional, for notify-send
 # ==============================================================================
 
 set -euo pipefail

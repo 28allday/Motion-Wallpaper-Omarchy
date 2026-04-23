@@ -182,28 +182,33 @@ show_header() {
 # ===== selection ==============================================================
 
 ensure_hyprland_env() {
-  # The TUI can be launched from contexts whose env doesn't carry a valid
-  # HYPRLAND_INSTANCE_SIGNATURE. Two failure modes:
-  #   1) HIS unset (fresh login shell from a non-graphical context)
-  #   2) HIS set but STALE — points to a previous Hyprland session whose
-  #      socket no longer exists (seen when Walker's env carries the
-  #      signature from an earlier login). The second case is silent but
-  #      equally broken: hyprctl dumps a plain-text error on stdout.
-  # `hyprctl instances` always reports the *live* signatures, so recover
-  # from that. Leave HIS unchanged if we can't find a live instance.
+  # The TUI can be launched from contexts whose HYPRLAND_INSTANCE_SIGNATURE
+  # isn't usable. Three failure modes, all silent:
+  #   1) HIS unset (fresh login shell, cron, ssh).
+  #   2) HIS set but points to a dead session — the `hypr/<sig>/` directory
+  #      and its socket files can linger on disk after the Hyprland process
+  #      exits, so a dir-exists check is not enough.
+  #   3) Walker's env retained an old HIS across a Hyprland restart.
+  # `hyprctl instances` is the source of truth: it only reports live
+  # instances. Always cross-check against it and rewrite HIS if ours isn't
+  # in the list.
   local his="${HYPRLAND_INSTANCE_SIGNATURE:-}"
-  if [ -n "$his" ] && [ -d "$RUNTIME_DIR/hypr/$his" ]; then
+  local live
+  live="$(hyprctl instances 2>/dev/null | awk '/^instance /{sub(/:$/,"",$2); print $2}')"
+  if [ -z "$live" ]; then
+    # No live Hyprland — nothing we can do, let the caller surface an error.
+    return 0
+  fi
+  if [ -n "$his" ] && printf '%s\n' "$live" | grep -qxF "$his"; then
     return 0
   fi
   local sig
-  sig="$(hyprctl instances 2>/dev/null | awk '/^instance /{sub(/:$/,"",$2); print $2; exit}')"
-  if [ -n "$sig" ] && [ "$sig" != "$his" ]; then
-    export HYPRLAND_INSTANCE_SIGNATURE="$sig"
-    if [ -n "$his" ]; then
-      log "replaced stale HYPRLAND_INSTANCE_SIGNATURE ($his → $sig)"
-    else
-      log "recovered HYPRLAND_INSTANCE_SIGNATURE=$sig from hyprctl instances"
-    fi
+  sig="$(printf '%s\n' "$live" | head -n 1)"
+  export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+  if [ -n "$his" ]; then
+    log "replaced stale HYPRLAND_INSTANCE_SIGNATURE ($his → $sig)"
+  else
+    log "recovered HYPRLAND_INSTANCE_SIGNATURE=$sig from hyprctl instances"
   fi
 }
 

@@ -21,17 +21,17 @@ log() {
 }
 
 his="${HYPRLAND_INSTANCE_SIGNATURE:-}"
-if [ -z "$his" ] || [ ! -d "$RUNTIME_DIR/hypr/$his" ]; then
-  # HIS is missing or stale (points to a dead session). Recover from the
-  # live signature reported by `hyprctl instances`.
-  sig="$(hyprctl instances 2>/dev/null | awk '/^instance /{sub(/:$/,"",$2); print $2; exit}')"
-  if [ -n "$sig" ]; then
-    export HYPRLAND_INSTANCE_SIGNATURE="$sig"
-    log "using HYPRLAND_INSTANCE_SIGNATURE=$sig (was: ${his:-unset})"
-  else
-    log "HYPRLAND_INSTANCE_SIGNATURE not usable and no live instance found — exiting"
-    exit 0
-  fi
+# Cross-check against `hyprctl instances` — the socket dir alone can linger
+# on disk after a session dies, so a dir-exists check isn't reliable.
+live="$(hyprctl instances 2>/dev/null | awk '/^instance /{sub(/:$/,"",$2); print $2}')"
+if [ -z "$live" ]; then
+  log "no live Hyprland instance reported by hyprctl — exiting"
+  exit 0
+fi
+if [ -z "$his" ] || ! printf '%s\n' "$live" | grep -qxF "$his"; then
+  sig="$(printf '%s\n' "$live" | head -n 1)"
+  export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+  log "using HYPRLAND_INSTANCE_SIGNATURE=$sig (was: ${his:-unset})"
 fi
 
 HYPR_SOCK="$RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
