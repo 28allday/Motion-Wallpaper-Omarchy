@@ -4,7 +4,7 @@
 
 Animated video wallpapers for [Omarchy](https://omarchy.com) (Arch Linux + Hyprland).
 
-Uses [mpvpaper](https://github.com/GhostNaN/mpvpaper) to play any video file as your desktop wallpaper, with a simple toggle to switch between video and your normal static wallpaper.
+Uses [mpvpaper](https://github.com/GhostNaN/mpvpaper) to play any video file as your desktop wallpaper. Features a [gum](https://github.com/charmbracelet/gum)-powered TUI with Stop / Change-video options, a quick-pick library folder, optional systemd autostart so the wallpaper survives reboots, and pause-on-fullscreen so games and full-screen video don't pay the decode cost.
 
 ## Quick Start
 
@@ -31,26 +31,34 @@ The installer handles all dependencies automatically.
 |---------|--------|---------|
 | `mpv` | Official repos | Video player engine (decodes and renders video) |
 | `jq` | Official repos | Parses monitor info from Hyprland |
-| `zenity` | Official repos | GUI dialogs (file picker, confirmations) |
+| `gum` | Official repos | TUI toolkit (action menus, monitor picker, file browser) |
+| `libnotify` | Official repos | `notify-send` for post-action desktop notifications |
 | `mpvpaper` | AUR | Wayland wallpaper daemon that uses mpv as its backend |
 
 ### Files Created
 
 | Path | Purpose |
 |------|---------|
-| `~/.local/bin/motion-wallpaper-toggle` | Toggle script (on/off switch) |
+| `~/.local/bin/motion-wallpaper-toggle` | Runtime script (toggle / start / stop / change / status) |
 | `~/.local/share/applications/motion-wallpaper-toggle.desktop` | App launcher entry |
+| `~/.config/systemd/user/motion-wallpaper.service` | Optional autostart unit (not enabled by default) |
+| `~/.config/motion-wallpaper/state` | Last-used video + target monitor |
+| `~/.cache/motion-wallpaper.log` | Runtime log |
 
 ## Usage
 
 ### From App Launcher
 
-Search for **"Motion Wallpaper"** in Walker or your app launcher.
+Search for **"Motion Wallpaper"** in Walker or your app launcher. Because the entry is a TUI, your launcher spawns a terminal window (`Terminal=true` in the `.desktop` entry) and runs the gum interface inside it. The terminal closes automatically when the action finishes.
 
 ### From Terminal
 
 ```bash
-motion-wallpaper-toggle
+motion-wallpaper-toggle            # interactive — toggle, or Stop/Change if running
+motion-wallpaper-toggle change     # pick a new video without stopping first
+motion-wallpaper-toggle stop       # stop and restore the normal wallpaper
+motion-wallpaper-toggle status     # print current state
+motion-wallpaper-toggle start      # non-interactive start from saved state (used by systemd)
 ```
 
 ### With a Keybind
@@ -63,23 +71,37 @@ bind = SUPER ALT, W, exec, ~/.local/bin/motion-wallpaper-toggle
 
 > **Note**: `SUPER+W` is already bound to "Close window" in Omarchy. Use `SUPER ALT+W` or another free combination.
 
+### Video library folder
+
+Drop videos in `~/Videos/Wallpapers/` and the picker shows that folder as a quick list instead of opening the full filesystem browser. A **Browse…** entry is always available for picking something outside the library.
+
+### Persist across reboots (autostart)
+
+Enable the bundled systemd user unit — it calls `motion-wallpaper-toggle start`, which loads the last video and target monitor from state and starts mpvpaper non-interactively:
+
+```bash
+systemctl --user enable --now motion-wallpaper.service
+```
+
+Disable with `systemctl --user disable --now motion-wallpaper.service`. If no state has been saved yet, the unit exits cleanly without error.
+
 ## How It Works
 
-The toggle script works as an on/off switch:
+### Toggle — not running
 
-### Toggle ON (no video wallpaper running)
+1. Detects monitors via `hyprctl monitors -j`.
+2. If multiple monitors, offers a picker with an **All monitors** option (passes `*` to mpvpaper).
+3. Shows the video library (if any) or a file picker.
+4. Stops the current wallpaper daemon (`swaybg` on Omarchy, or `hyprpaper` on generic Hyprland) so mpvpaper is visible, then starts `mpvpaper -f` with `--auto-pause`, `--loop`, `--vo=gpu`, `--profile=high-quality`.
+5. Verifies mpvpaper is alive after 0.5s; surfaces failures inline in the TUI and holds the terminal open until you press enter.
+6. Saves the video path and target to `~/.config/motion-wallpaper/state`.
 
-1. Detects your connected monitors via `hyprctl monitors -j`
-2. If multiple monitors, shows a selection dialog
-3. Opens a file picker to choose a video file
-4. Stops `hyprpaper` and `swaybg` (Omarchy's default wallpaper daemons) so mpvpaper is visible
-5. Starts `mpvpaper` in the background with GPU-accelerated looping playback
+### Toggle — already running
 
-### Toggle OFF (video wallpaper is running)
+Shows a radiolist with two choices:
 
-1. Shows a confirmation dialog
-2. Stops `mpvpaper`
-3. Restarts `hyprpaper` to restore your normal static wallpaper
+- **Stop motion wallpaper** — kill mpvpaper and restore the previous static wallpaper. On Omarchy this respawns `swaybg -i ~/.config/omarchy/current/background -m fill` via `uwsm-app`, matching how Omarchy autostarts it; on generic Hyprland it re-execs `hyprpaper`.
+- **Change video** — pick a new video, keep the same target, swap in place.
 
 ## Supported Video Formats
 
@@ -108,36 +130,54 @@ Search for "live wallpaper" or "motion desktop" videos. Good sources include:
 
 ## Performance
 
-mpvpaper uses GPU-accelerated rendering (`--vo=gpu`) so CPU usage is minimal. However:
+mpvpaper uses GPU-accelerated rendering (`--vo=gpu`) so CPU usage is minimal. `--auto-pause` also pauses playback whenever a fullscreen window covers the wallpaper, so games and full-screen video don't pay the decode cost.
 
-- Video decoding does use some GPU resources
-- Higher resolution videos use more VRAM
-- If you notice performance impact in games, toggle the wallpaper off first
+- Higher resolution videos use more VRAM.
+- Shorter seamless loops (10–30s) use less memory.
+- If you still notice impact, toggle the wallpaper off or disable autostart.
 
 ## Troubleshooting
 
-**Video wallpaper doesn't appear / shows black**
-- Make sure hyprpaper and swaybg are not running: `pgrep hyprpaper && pkill hyprpaper`
-- Try a different video file to rule out codec issues
+First stop: `~/.cache/motion-wallpaper.log` — both the toggle script and mpvpaper write there.
 
-**File picker doesn't open**
-- Check zenity is installed: `pacman -Qi zenity`
+**Video wallpaper doesn't appear / shows black**
+- Check the log. Codec issues and "no such monitor" errors both show up there.
+- Make sure hyprpaper and swaybg are not running: `pgrep hyprpaper && pkill hyprpaper`
+
+**TUI fails with "gum is not installed"**
+- `sudo pacman -S gum`
+
+**Launcher runs it but no terminal opens**
+- Make sure your default terminal is XDG-registered. Omarchy's alacritty works out of the box.
+- As a fallback, run `motion-wallpaper-toggle` directly from any terminal.
 
 **"No monitors detected" error**
 - Make sure you're running Hyprland: `echo $XDG_CURRENT_DESKTOP`
 - Check hyprctl works: `hyprctl monitors`
 
+**Autostart unit fails**
+- `journalctl --user -u motion-wallpaper.service`
+- If the saved video was moved or deleted, the unit exits non-zero. Run the toggle interactively once to save fresh state.
+
 **Normal wallpaper doesn't come back after toggling off**
-- Manually restart hyprpaper: `hyprctl dispatch exec hyprpaper`
+- Omarchy: `pkill -x swaybg; setsid uwsm-app -- swaybg -i ~/.config/omarchy/current/background -m fill &`
+- Or just cycle the background: `omarchy-theme-bg-next` then back with `SUPER CTRL SPACE`.
+- Generic Hyprland: `hyprctl dispatch exec hyprpaper`.
 
 ## Uninstalling
 
 ```bash
-# Remove the toggle script
-rm -f ~/.local/bin/motion-wallpaper-toggle
+# Stop and disable autostart if enabled
+systemctl --user disable --now motion-wallpaper.service 2>/dev/null || true
 
-# Remove the app launcher entry
+# Remove installed files
+rm -f ~/.local/bin/motion-wallpaper-toggle
 rm -f ~/.local/share/applications/motion-wallpaper-toggle.desktop
+rm -f ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg
+rm -f ~/.config/systemd/user/motion-wallpaper.service
+rm -rf ~/.config/motion-wallpaper
+rm -f ~/.cache/motion-wallpaper.log
+systemctl --user daemon-reload
 
 # Optionally remove packages
 sudo pacman -Rns mpvpaper zenity

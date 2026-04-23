@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Motion Wallpaper</title>
+
+  <!-- Rounded square app-tile background -->
+  <rect x="16" y="16" width="224" height="224" rx="44" ry="44" fill="#1e1e2e"/>
+
+  <!-- Monitor frame -->
+  <rect x="44" y="64" width="168" height="116" rx="14" ry="14"
+        fill="#11111b" stroke="#cdd6f4" stroke-width="5"/>
+
+  <!-- Subtle waveform inside screen — signals moving wallpaper -->
+  <path d="M 60 146 Q 84 118 108 146 T 156 146 T 196 146"
+        stroke="#cdd6f4" stroke-width="4" fill="none"
+        stroke-linecap="round" opacity="0.35"/>
+
+  <!-- Play triangle -->
+  <path d="M 108 94 L 108 138 L 148 116 Z" fill="#cba6f7"/>
+
+  <!-- Monitor stand -->
+  <rect x="116" y="180" width="24" height="18" fill="#cdd6f4"/>
+  <rect x="84" y="198" width="88" height="10" rx="5" ry="5" fill="#cdd6f4"/>
+</svg>

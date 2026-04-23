@@ -1,0 +1,490 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Motion Wallpaper — gum-powered TUI for mpvpaper on Omarchy / Hyprland.
+#
+# Actions:
+#   toggle   (default)  Interactive TUI. If running, offers Stop / Change.
+#   start               Non-interactive start from saved state (for systemd).
+#   stop                Stop mpvpaper and restore the normal wallpaper.
+#   change              Pick a new video while already running.
+#   status              Print current state (TUI header via gum).
+#
+# Files:
+#   ~/.config/motion-wallpaper/state        last video + target monitor
+#   ~/Videos/Wallpapers/                    optional quick-pick library
+#   ~/.cache/motion-wallpaper.log           runtime log
+# ==============================================================================
+
+set -euo pipefail
+
+APP_NAME="Motion Wallpaper"
+STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/motion-wallpaper"
+STATE_FILE="$STATE_DIR/state"
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
+LOG_FILE="$LOG_DIR/motion-wallpaper.log"
+LIBRARY_DIR="$HOME/Videos/Wallpapers"
+
+# mpv options forwarded via mpvpaper -o. An input-ipc-server socket is opened
+# so our companion watcher can send pause/resume commands when Hyprland
+# reports a fullscreen window (mpvpaper's own -p is unreliable on 0.54.x).
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+MPV_IPC_SOCK="$RUNTIME_DIR/motion-wallpaper-mpv.sock"
+MPV_OPTS="--loop --no-audio --mute=yes --vo=gpu --profile=high-quality --input-ipc-server=$MPV_IPC_SOCK"
+
+# Catppuccin Mocha-ish accents
+COLOR_ACCENT="#cba6f7"
+COLOR_ERROR="#f38ba8"
+COLOR_OK="#a6e3a1"
+COLOR_MUTED="#6c7086"
+
+BROWSE_SENTINEL="── Browse filesystem… ──"
+
+mkdir -p "$STATE_DIR" "$LOG_DIR"
+
+# ===== helpers ================================================================
+
+log() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
+}
+
+require_gum() {
+  if ! command -v gum >/dev/null 2>&1; then
+    echo "ERROR: gum is not installed. Run: sudo pacman -S gum" >&2
+    exit 1
+  fi
+}
+
+require_tty() {
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    cat >&2 <<MSG
+$APP_NAME: interactive mode requires a terminal.
+Run from a terminal, or use a non-interactive action:
+  $0 start | stop | status
+MSG
+    exit 1
+  fi
+}
+
+tui_err() {
+  gum style --foreground="$COLOR_ERROR" --bold "ERROR: $1"
+  log "ERROR: $1"
+  # Hold the terminal open so launcher-spawned windows don't flash away.
+  if [ -t 0 ]; then
+    gum input --placeholder="Press enter to close…" >/dev/null 2>&1 || true
+  fi
+}
+
+tui_ok() {
+  gum style --foreground="$COLOR_OK" "✓ $1"
+  log "$1"
+}
+
+notify() {
+  # Fire-and-forget system notification so the user sees results after the
+  # TUI terminal closes.
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send "$APP_NAME" "$1" || true
+  fi
+  log "$1"
+}
+
+load_state() {
+  LAST_VIDEO=""
+  LAST_TARGET=""
+  LAST_DIR=""
+  if [ -f "$STATE_FILE" ]; then
+    # shellcheck source=/dev/null
+    source "$STATE_FILE"
+  fi
+}
+
+save_state() {
+  # $1 video, $2 target, $3 (optional) last dir — defaults to dirname of $1
+  # so the filesystem browser re-opens where the user last landed.
+  local dir="${3:-$(dirname "$1")}"
+  umask 077
+  cat > "$STATE_FILE" <<STATE
+LAST_VIDEO="$1"
+LAST_TARGET="$2"
+LAST_DIR="$dir"
+STATE
+}
+
+is_running() {
+  pgrep -x mpvpaper >/dev/null 2>&1
+}
+
+# ===== autostart (systemd user unit) ==========================================
+
+autostart_installed() {
+  systemctl --user list-unit-files motion-wallpaper.service >/dev/null 2>&1
+}
+
+autostart_enabled() {
+  systemctl --user is-enabled motion-wallpaper.service >/dev/null 2>&1
+}
+
+autostart_enable() {
+  if ! autostart_installed; then
+    tui_err "motion-wallpaper.service is not installed. Re-run wallpaper.sh."
+    return 1
+  fi
+  systemctl --user enable motion-wallpaper.service >/dev/null 2>&1
+  log "autostart enabled"
+}
+
+autostart_disable() {
+  systemctl --user disable motion-wallpaper.service >/dev/null 2>&1 || true
+  log "autostart disabled"
+}
+
+show_header() {
+  load_state
+  local status_line target_line video_line autostart_line
+  if is_running; then
+    status_line="status:    $(gum style --foreground="$COLOR_OK" running)"
+  else
+    status_line="status:    $(gum style --foreground="$COLOR_MUTED" stopped)"
+  fi
+  target_line="target:    ${LAST_TARGET:-$(gum style --foreground="$COLOR_MUTED" --italic '(none)')}"
+  video_line="video:     ${LAST_VIDEO:-$(gum style --foreground="$COLOR_MUTED" --italic '(none)')}"
+  if autostart_enabled; then
+    autostart_line="autostart: $(gum style --foreground="$COLOR_OK" enabled)"
+  else
+    autostart_line="autostart: $(gum style --foreground="$COLOR_MUTED" disabled)"
+  fi
+  gum style --border=rounded --border-foreground="$COLOR_ACCENT" \
+            --padding="1 2" --margin="1 0" \
+            "$(gum style --bold --foreground="$COLOR_ACCENT" "◐ $APP_NAME")" \
+            "" \
+            "$status_line" \
+            "$target_line" \
+            "$video_line" \
+            "$autostart_line"
+}
+
+# ===== selection ==============================================================
+
+get_monitors() {
+  local mon_json
+  mon_json="$(hyprctl monitors -j 2>/dev/null || true)"
+  [ -z "$mon_json" ] && return 1
+  printf '%s' "$mon_json" | jq -r '.[].name'
+}
+
+pick_target() {
+  command -v hyprctl >/dev/null || { tui_err "hyprctl not found. Are you in Hyprland?"; return 1; }
+  command -v jq      >/dev/null || { tui_err "jq is not installed.";                     return 1; }
+
+  local monitors
+  monitors="$(get_monitors)" || { tui_err "Could not read monitors from hyprctl."; return 1; }
+  [ -z "$monitors" ]          && { tui_err "No monitors detected.";                return 1; }
+
+  local count
+  count="$(printf '%s\n' "$monitors" | wc -l)"
+  if [ "$count" -eq 1 ]; then
+    printf '%s' "$monitors"
+    return 0
+  fi
+
+  local selected
+  selected=$( { echo "All monitors"; printf '%s\n' "$monitors"; } \
+    | gum choose --header="Select a monitor") || return 1
+
+  if [ "$selected" = "All monitors" ]; then
+    printf '%s' '*'
+  else
+    printf '%s' "$selected"
+  fi
+}
+
+browse_filesystem() {
+  # Start gum file at the last directory we successfully picked from, so
+  # changing videos returns the user to where they were. Falls back to the
+  # last video's dirname (for state files pre-dating LAST_DIR), then $HOME.
+  load_state
+  local start_dir="${LAST_DIR:-}"
+  if [ -z "$start_dir" ] && [ -n "${LAST_VIDEO:-}" ]; then
+    start_dir="$(dirname "$LAST_VIDEO")"
+  fi
+  if [ -z "$start_dir" ] || [ ! -d "$start_dir" ]; then
+    start_dir="$HOME"
+  fi
+  gum file --height=20 "$start_dir"
+}
+
+pick_video() {
+  local library=() basenames=() v
+  if [ -d "$LIBRARY_DIR" ]; then
+    while IFS= read -r -d '' f; do
+      library+=("$f")
+    done < <(
+      find "$LIBRARY_DIR" -maxdepth 1 -type f \
+        \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.mov' -o -iname '*.avi' \) \
+        -print0 2>/dev/null | sort -z
+    )
+  fi
+
+  if [ ${#library[@]} -eq 0 ]; then
+    browse_filesystem || return 1
+    return 0
+  fi
+
+  for v in "${library[@]}"; do
+    basenames+=("$(basename "$v")")
+  done
+
+  local choice
+  choice=$( { printf '%s\n' "${basenames[@]}"; echo "$BROWSE_SENTINEL"; } \
+    | gum choose --header="Choose a video from $LIBRARY_DIR") || return 1
+
+  if [ "$choice" = "$BROWSE_SENTINEL" ]; then
+    browse_filesystem
+  else
+    printf '%s' "$LIBRARY_DIR/$choice"
+  fi
+}
+
+# ===== mpvpaper control =======================================================
+
+kill_static_wallpapers() {
+  pkill -x hyprpaper 2>/dev/null || true
+  pkill -x swaybg    2>/dev/null || true
+}
+
+kill_watcher() {
+  pkill -f motion-wallpaper-watcher 2>/dev/null || true
+}
+
+start_watcher() {
+  local watcher
+  # PATH in launcher-spawned terminals is unreliable (minimal systemd env etc),
+  # so fall back to the script's own directory where the installer puts both.
+  watcher="$(command -v motion-wallpaper-watcher 2>/dev/null || true)"
+  if [ -z "$watcher" ]; then
+    local self_dir
+    self_dir="$(dirname "$(readlink -f "$0")")"
+    if [ -x "$self_dir/motion-wallpaper-watcher" ]; then
+      watcher="$self_dir/motion-wallpaper-watcher"
+    fi
+  fi
+  if [ -z "$watcher" ]; then
+    log "watcher binary not found — auto-pause disabled"
+    return 0
+  fi
+  kill_watcher
+  setsid "$watcher" < /dev/null >> "$LOG_FILE" 2>&1 &
+  disown 2>/dev/null || true
+  log "watcher spawned via $watcher"
+}
+
+restore_static_wallpaper() {
+  local omarchy_bg="$HOME/.config/omarchy/current/background"
+  if [ -e "$omarchy_bg" ]; then
+    pkill -x hyprpaper 2>/dev/null || true
+    pkill -x swaybg    2>/dev/null || true
+    if command -v uwsm-app >/dev/null 2>&1; then
+      setsid uwsm-app -- swaybg -i "$omarchy_bg" -m fill >/dev/null 2>&1 &
+    else
+      setsid swaybg -i "$omarchy_bg" -m fill >/dev/null 2>&1 &
+    fi
+    disown 2>/dev/null || true
+    log "restored swaybg -> $omarchy_bg"
+  elif command -v hyprpaper >/dev/null 2>&1; then
+    hyprctl dispatch exec hyprpaper >/dev/null 2>&1 || true
+    log "restored hyprpaper"
+  else
+    log "no known static wallpaper daemon to restore"
+  fi
+}
+
+start_mpvpaper_fg() {
+  local target="$1" video="$2"
+  kill_static_wallpapers
+  pkill -x mpvpaper 2>/dev/null || true
+  sleep 0.3
+  log "systemd start target=$target video=$video"
+  start_watcher
+  # shellcheck disable=SC2086  # intentional word-splitting on MPV_OPTS
+  exec mpvpaper -o "$MPV_OPTS" "$target" "$video"
+}
+
+start_mpvpaper_bg() {
+  local target="$1" video="$2"
+  kill_static_wallpapers
+  pkill -x mpvpaper 2>/dev/null || true
+  sleep 0.3
+  log "start target=$target video=$video"
+  # setsid detaches from the controlling terminal so mpvpaper survives the
+  # TUI terminal closing; uwsm-app parents it to the user systemd scope
+  # (matches how Omarchy autostarts swaybg). Without both, mpvpaper was
+  # getting SIGHUP'd when the Walker-spawned terminal exited.
+  # shellcheck disable=SC2086  # intentional word-splitting on MPV_OPTS
+  if command -v uwsm-app >/dev/null 2>&1; then
+    setsid uwsm-app -- mpvpaper -o "$MPV_OPTS" "$target" "$video" \
+      < /dev/null >> "$LOG_FILE" 2>&1 &
+  else
+    # shellcheck disable=SC2086
+    setsid mpvpaper -o "$MPV_OPTS" "$target" "$video" \
+      < /dev/null >> "$LOG_FILE" 2>&1 &
+  fi
+  disown 2>/dev/null || true
+  start_watcher
+  sleep 0.8
+  if ! is_running; then
+    tui_err "mpvpaper failed to start. See $LOG_FILE for details."
+    return 1
+  fi
+}
+
+stop_mpvpaper() {
+  kill_watcher
+  pkill -x mpvpaper 2>/dev/null || true
+  # mpv cleans up the IPC socket on exit, but if we killed mpvpaper hard
+  # the dangling socket can linger and confuse the next run.
+  rm -f "$MPV_IPC_SOCK" 2>/dev/null || true
+  restore_static_wallpaper
+  log "stopped"
+}
+
+# ===== actions ================================================================
+
+action_toggle() {
+  require_gum
+  require_tty
+
+  if is_running; then
+    show_header
+    local autostart_label
+    if autostart_enabled; then
+      autostart_label="Turn autostart OFF"
+    else
+      autostart_label="Turn autostart ON"
+    fi
+    local choice
+    choice=$(gum choose --header="What would you like to do?" \
+      "Stop motion wallpaper" "Change video" "$autostart_label" "Cancel") || exit 0
+
+    case "$choice" in
+      "Stop motion wallpaper")
+        stop_mpvpaper
+        tui_ok "Stopped. Normal wallpaper restored."
+        notify "Motion wallpaper stopped."
+        ;;
+      "Change video")
+        load_state
+        local video
+        video=$(pick_video) || exit 0
+        [ -z "$video" ]  && exit 0
+        [ -f "$video" ]  || { tui_err "File not found: $video"; exit 1; }
+        save_state "$video" "$LAST_TARGET"
+        start_mpvpaper_bg "$LAST_TARGET" "$video" || exit 1
+        tui_ok "Swapped to $(basename "$video")."
+        notify "Motion wallpaper updated."
+        ;;
+      "Turn autostart ON")
+        autostart_enable && tui_ok "Autostart enabled — wallpaper will resume after reboot."
+        ;;
+      "Turn autostart OFF")
+        autostart_disable
+        tui_ok "Autostart disabled."
+        ;;
+      Cancel) exit 0 ;;
+    esac
+    return 0
+  fi
+
+  show_header
+  local target video
+  target=$(pick_target) || exit 0
+  [ -z "$target" ] && exit 0
+  video=$(pick_video) || exit 0
+  [ -z "$video" ]  && exit 0
+  [ -f "$video" ]  || { tui_err "File not found: $video"; exit 1; }
+
+  save_state "$video" "$target"
+  start_mpvpaper_bg "$target" "$video" || exit 1
+  tui_ok "Started $(basename "$video") on $target."
+  notify "Motion wallpaper started on $target."
+
+  # Offer autostart on first fresh start (skipped silently if already on or
+  # if the systemd unit isn't installed).
+  if autostart_installed && ! autostart_enabled; then
+    if gum confirm "Start motion wallpaper automatically after login / reboot?"; then
+      autostart_enable && tui_ok "Autostart enabled."
+    fi
+  fi
+}
+
+action_change() {
+  require_gum
+  require_tty
+  if ! is_running; then
+    tui_err "Motion wallpaper is not running."
+    exit 1
+  fi
+  load_state
+  local video
+  video=$(pick_video) || exit 0
+  [ -z "$video" ]  && exit 0
+  [ -f "$video" ]  || { tui_err "File not found: $video"; exit 1; }
+  save_state "$video" "$LAST_TARGET"
+  start_mpvpaper_bg "$LAST_TARGET" "$video" || exit 1
+  tui_ok "Swapped to $(basename "$video")."
+  notify "Motion wallpaper updated."
+}
+
+action_start() {
+  load_state
+  if [ -z "$LAST_VIDEO" ] || [ -z "$LAST_TARGET" ]; then
+    log "autostart: no saved state, exiting cleanly"
+    exit 0
+  fi
+  if [ ! -f "$LAST_VIDEO" ]; then
+    log "autostart: saved video missing ($LAST_VIDEO)"
+    exit 1
+  fi
+  start_mpvpaper_fg "$LAST_TARGET" "$LAST_VIDEO"
+}
+
+action_stop() {
+  stop_mpvpaper
+}
+
+action_status() {
+  if command -v gum >/dev/null 2>&1 && [ -t 1 ]; then
+    show_header
+  else
+    load_state
+    if is_running; then echo "status: running"; else echo "status: stopped"; fi
+    if [ -n "${LAST_TARGET:-}" ]; then echo "target: $LAST_TARGET"; fi
+    if [ -n "${LAST_VIDEO:-}"  ]; then echo "video:  $LAST_VIDEO";  fi
+  fi
+}
+
+# ===== main ===================================================================
+
+case "${1:-toggle}" in
+  toggle) action_toggle ;;
+  start)  action_start  ;;
+  stop)   action_stop   ;;
+  change) action_change ;;
+  status) action_status ;;
+  -h|--help)
+    cat <<USAGE
+$APP_NAME
+Usage: ${0##*/} [toggle|start|stop|change|status]
+
+  toggle   Interactive gum TUI (default). If running, offers Stop / Change.
+  start    Start from saved state without prompting (for systemd).
+  stop     Stop mpvpaper and restore the normal wallpaper.
+  change   Pick a new video while already running.
+  status   Print current state.
+USAGE
+    ;;
+  *)
+    echo "Unknown action: $1" >&2
+    echo "Try: ${0##*/} --help" >&2
+    exit 1
+    ;;
+esac
