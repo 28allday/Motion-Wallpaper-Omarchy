@@ -181,11 +181,44 @@ show_header() {
 
 # ===== selection ==============================================================
 
+ensure_hyprland_env() {
+  # The TUI can be launched from contexts whose env doesn't carry
+  # HYPRLAND_INSTANCE_SIGNATURE (XDG launchers, cron, ssh). `hyprctl instances`
+  # still works in that case and prints the running signatures, so recover by
+  # picking the first one. If we can't, leave HIS unset and let the caller
+  # surface a friendly error.
+  if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+    return 0
+  fi
+  local sig
+  sig="$(hyprctl instances 2>/dev/null | awk '/^instance /{sub(/:$/,"",$2); print $2; exit}')"
+  if [ -n "$sig" ]; then
+    export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+    log "recovered HYPRLAND_INSTANCE_SIGNATURE=$sig from hyprctl instances"
+  fi
+}
+
 get_monitors() {
-  local mon_json
+  # hyprctl's failure modes are noisy: when HYPRLAND_INSTANCE_SIGNATURE isn't
+  # set (can happen when the TUI is spawned from a launcher whose env doesn't
+  # inherit the Hyprland session), hyprctl prints a plain-text error to stdout
+  # and exits 0 — which then makes jq complain loudly. Validate the JSON and
+  # fall back to parsing the human-readable form.
+  ensure_hyprland_env
+  local mon_json mon_text
   mon_json="$(hyprctl monitors -j 2>/dev/null || true)"
-  [ -z "$mon_json" ] && return 1
-  printf '%s' "$mon_json" | jq -r '.[].name'
+  if [ -n "$mon_json" ] && printf '%s' "$mon_json" | jq -e . >/dev/null 2>&1; then
+    printf '%s' "$mon_json" | jq -r '.[].name'
+    return 0
+  fi
+  mon_text="$(hyprctl monitors 2>/dev/null || true)"
+  if [ -n "$mon_text" ]; then
+    printf '%s\n' "$mon_text" \
+      | awk '/^Monitor /{print $2; ok=1} END{exit !ok}' \
+      && return 0
+  fi
+  log "get_monitors: hyprctl produced no usable output (HIS=${HYPRLAND_INSTANCE_SIGNATURE:-unset})"
+  return 1
 }
 
 pick_target() {
@@ -193,8 +226,14 @@ pick_target() {
   command -v jq      >/dev/null || { tui_err "jq is not installed.";                     return 1; }
 
   local monitors
-  monitors="$(get_monitors)" || { tui_err "Could not read monitors from hyprctl."; return 1; }
-  [ -z "$monitors" ]          && { tui_err "No monitors detected.";                return 1; }
+  if ! monitors="$(get_monitors)" || [ -z "$monitors" ]; then
+    if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+      tui_err "HYPRLAND_INSTANCE_SIGNATURE is not set — the launcher didn't inherit the Hyprland session. Try running motion-wallpaper-toggle from a regular terminal."
+    else
+      tui_err "Could not read monitors from hyprctl. See $LOG_FILE."
+    fi
+    return 1
+  fi
 
   local count
   count="$(printf '%s\n' "$monitors" | wc -l)"

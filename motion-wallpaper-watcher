@@ -21,8 +21,16 @@ log() {
 }
 
 if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
-  log "HYPRLAND_INSTANCE_SIGNATURE not set — exiting"
-  exit 0
+  # Recover the signature from `hyprctl instances` — same trick the toggle
+  # script uses when launched from an env that didn't inherit HIS.
+  sig="$(hyprctl instances 2>/dev/null | awk '/^instance /{sub(/:$/,"",$2); print $2; exit}')"
+  if [ -n "$sig" ]; then
+    export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+    log "recovered HYPRLAND_INSTANCE_SIGNATURE=$sig from hyprctl instances"
+  else
+    log "HYPRLAND_INSTANCE_SIGNATURE not set and no instance found — exiting"
+    exit 0
+  fi
 fi
 
 HYPR_SOCK="$RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
