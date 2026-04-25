@@ -140,7 +140,6 @@ Any format mpv supports, including:
 Search for "live wallpaper" or "motion desktop" videos. Good sources include:
 
 - [MoeWalls](https://moewalls.com/) — large free library of live/animated wallpapers (anime, landscape, gaming, minimal); direct `.mp4` downloads, no signup
-- YouTube (download with `yt-dlp`)
 - Free stock video sites (Pexels, Pixabay)
 
 **Tips for best results:**
