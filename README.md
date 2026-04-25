@@ -4,7 +4,7 @@
 
 Animated video wallpapers for [Omarchy](https://omarchy.com) (Arch Linux + Hyprland).
 
-Uses [mpvpaper](https://github.com/GhostNaN/mpvpaper) to play any video file as your desktop wallpaper. Features a [gum](https://github.com/charmbracelet/gum)-powered TUI with Stop / Change-video / autostart toggle, a quick-pick library folder, a systemd autostart unit so the wallpaper survives reboots, and an auto-pause watcher that subscribes to Hyprland's event socket and pauses the video whenever a fullscreen window covers the wallpaper — so games and full-screen video don't pay the decode cost.
+Uses [mpvpaper](https://github.com/GhostNaN/mpvpaper) to play any video file as your desktop wallpaper. Features a [gum](https://github.com/charmbracelet/gum)-powered TUI that follows your active Omarchy theme and launches as a floating window, a quick-pick library folder, a systemd autostart unit so the wallpaper survives reboots, an auto-pause watcher that subscribes to Hyprland's event socket and pauses the video whenever a fullscreen window covers the wallpaper, and a theme watcher that cleanly stops the wallpaper when you cycle Omarchy themes so the new theme's background takes over.
 
 ## Quick Start
 
@@ -42,7 +42,8 @@ The installer handles all dependencies automatically.
 |------|---------|
 | `~/.local/bin/motion-wallpaper-toggle` | Runtime TUI (toggle / start / stop / change / status) |
 | `~/.local/bin/motion-wallpaper-watcher` | Auto-pause watcher — pauses mpv on fullscreen |
-| `~/.local/share/applications/motion-wallpaper-toggle.desktop` | App launcher entry (Terminal=true) |
+| `~/.local/bin/motion-wallpaper-theme-watcher` | Theme watcher — stops the wallpaper when the Omarchy theme changes |
+| `~/.local/share/applications/motion-wallpaper-toggle.desktop` | App launcher entry — opens as a floating terminal via `xdg-terminal-exec --app-id=TUI.float` |
 | `~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg` | Launcher icon |
 | `~/.config/systemd/user/motion-wallpaper.service` | Autostart unit (not enabled by default) |
 | `~/.config/motion-wallpaper/state` | Last video, target monitor, and last-used directory |
@@ -52,7 +53,7 @@ The installer handles all dependencies automatically.
 
 ### From App Launcher
 
-Search for **"Motion Wallpaper"** in Walker or your app launcher. Because the entry is a TUI, your launcher spawns a terminal window (`Terminal=true` in the `.desktop` entry) and runs the gum interface inside it. The terminal closes automatically when the action finishes.
+Search for **"Motion Wallpaper"** in Walker or your app launcher. The `.desktop` entry launches via `xdg-terminal-exec --app-id=TUI.float`, so Hyprland's existing floating-window rule renders it as a centered floating terminal (the same treatment given to TUIs like btop and impala) instead of a tiled fullscreen one. The window closes automatically when you exit. The TUI itself reads `~/.config/omarchy/current/theme/colors.toml` and recolours its menu cursor, headers, and prompts to match the active theme (Catppuccin fallback if the file is missing).
 
 ### From Terminal
 
@@ -107,14 +108,22 @@ If no state has been saved yet, the unit exits cleanly without error.
 
 Shows a menu with four entries:
 
-- **Stop motion wallpaper** — kill the watcher + mpvpaper and restore the previous static wallpaper. On Omarchy this respawns `swaybg -i ~/.config/omarchy/current/background -m fill` via `uwsm-app`, matching how Omarchy autostarts it; on generic Hyprland it re-execs `hyprpaper`. Stop is `flock`-guarded, so the TUI path and systemd's `ExecStop` can't race.
-- **Change video** — pick a new video, keep the same target, swap in place (`LAST_DIR` updates if you browsed).
+- **Stop motion wallpaper** — kill the watchers + mpvpaper and restore the previous static wallpaper. On Omarchy this respawns `swaybg -i ~/.config/omarchy/current/background -m fill` via `uwsm-app`, matching how Omarchy autostarts it; on generic Hyprland it re-execs `hyprpaper`. Stop is `flock`-guarded, so the TUI path and systemd's `ExecStop` can't race.
+- **Change video** — pick a new video and target monitor, swap in place (`LAST_DIR` updates if you browsed).
 - **Turn autostart ON / OFF** — toggles the systemd unit. Label reflects current state.
 - **Cancel** — bail without changes.
+
+After every action the TUI loops back to the main menu — only Cancel or Esc closes the window. Saved targets are validated against `hyprctl monitors` on each start, so if the monitor you last targeted has been unplugged the wallpaper falls back to **All monitors** instead of erroring.
 
 ### Auto-pause (the watcher)
 
 `motion-wallpaper-watcher` subscribes to Hyprland's event socket (`$XDG_RUNTIME_DIR/hypr/<instance>/.socket2.sock`) and, on `fullscreen>>1`, sends `{"command":["set_property","pause",true]}` to mpv's IPC socket (`--input-ipc-server`). On `fullscreen>>0` it resumes. The watcher is started and killed alongside mpvpaper by the toggle script. mpvpaper's own `-p` flag was flaky on Hyprland 0.54.x, hence this external approach.
+
+Both the toggle and the watcher self-recover `HYPRLAND_INSTANCE_SIGNATURE` if the launcher strips it from the env or carries a stale value across a Hyprland restart — they cross-check the signature against `hyprctl instances` (the live source of truth) and rewrite it before any `hyprctl` call.
+
+### Theme change (the theme-watcher)
+
+`motion-wallpaper-theme-watcher` polls `~/.config/omarchy/current/background` every 2 seconds and, when the symlink target changes, runs `motion-wallpaper-toggle stop`. That tears down mpvpaper and respawns `swaybg` against the new symlink so the new theme's static wallpaper takes over cleanly — without it, mpvpaper would keep playing on top of the new theme's background. Spawned and killed alongside mpvpaper by the toggle script; exits silently on non-Omarchy systems where the symlink doesn't exist.
 
 ## Supported Video Formats
 
@@ -191,6 +200,7 @@ systemctl --user disable --now motion-wallpaper.service 2>/dev/null || true
 # Remove installed files
 rm -f ~/.local/bin/motion-wallpaper-toggle
 rm -f ~/.local/bin/motion-wallpaper-watcher
+rm -f ~/.local/bin/motion-wallpaper-theme-watcher
 rm -f ~/.local/share/applications/motion-wallpaper-toggle.desktop
 rm -f ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg
 rm -f ~/.config/systemd/user/motion-wallpaper.service
