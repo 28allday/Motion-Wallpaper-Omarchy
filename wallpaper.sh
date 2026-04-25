@@ -118,15 +118,18 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
 fi
 
 mkdir -p "$HOME/.local/share/applications"
+# Launch in a floating terminal via Omarchy's TUI.float app-id, which the
+# default Hyprland windowrule (system.conf) tags as a floating window — same
+# pattern omarchy-tui-install uses for user-added TUIs (impala, btop, etc.).
 cat > "$HOME/.local/share/applications/motion-wallpaper-toggle.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=Motion Wallpaper
 Comment=Toggle animated video wallpaper on/off (TUI)
-Exec=$HOME/.local/bin/motion-wallpaper-toggle
+Exec=xdg-terminal-exec --app-id=TUI.float -e $HOME/.local/bin/motion-wallpaper-toggle
 Icon=motion-wallpaper
-Terminal=true
+Terminal=false
 Categories=Utility;Settings;DesktopSettings;
 Keywords=wallpaper;video;animated;background;
 EOF

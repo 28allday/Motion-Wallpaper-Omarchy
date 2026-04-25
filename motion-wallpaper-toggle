@@ -31,13 +31,167 @@ RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 MPV_IPC_SOCK="$RUNTIME_DIR/motion-wallpaper-mpv.sock"
 MPV_OPTS="--loop --no-audio --mute=yes --vo=gpu --profile=high-quality --input-ipc-server=$MPV_IPC_SOCK"
 
-# Catppuccin Mocha-ish accents
-COLOR_ACCENT="#cba6f7"
-COLOR_ERROR="#f38ba8"
-COLOR_OK="#a6e3a1"
-COLOR_MUTED="#6c7086"
+# ===== theme colors ===========================================================
+# Pull TUI accents from the active Omarchy theme so the interface follows the
+# system color scheme (the file is a symlink that swaps when the user runs
+# omarchy-theme-set). Defaults below are Catppuccin Mocha and only kick in if
+# colors.toml is missing or unreadable.
+THEME_COLORS_FILE="$HOME/.config/omarchy/current/theme/colors.toml"
 
-BROWSE_SENTINEL="── Browse filesystem… ──"
+load_theme_colors() {
+  COLOR_ACCENT="#cba6f7"
+  COLOR_ERROR="#f38ba8"
+  COLOR_OK="#a6e3a1"
+  COLOR_MUTED="#6c7086"
+  [ -r "$THEME_COLORS_FILE" ] || return 0
+
+  local key val
+  while IFS='=' read -r key val; do
+    key="${key// /}"
+    val="${val// /}"; val="${val//\"/}"
+    case "$key" in
+      accent) COLOR_ACCENT="$val" ;;  # primary accent
+      color1) COLOR_ERROR="$val"  ;;  # ANSI red    → errors
+      color2) COLOR_OK="$val"     ;;  # ANSI green  → success
+      color8) COLOR_MUTED="$val"  ;;  # ANSI bright black → muted lines
+    esac
+  done < "$THEME_COLORS_FILE"
+}
+load_theme_colors
+
+# ===== layout =================================================================
+# Center the status panel horizontally in the floating window. gum style's
+# --margin shifts the whole box right; we compute the side margin from the
+# real terminal width (tput cols) so the panel sits centered regardless of
+# how the user has sized the floating window.
+TERM_COLS="$(tput cols 2>/dev/null || echo "${COLUMNS:-80}")"
+TERM_ROWS="$(tput lines 2>/dev/null || echo "${LINES:-24}")"
+PANEL_WIDTH=52
+# Clamp panel width on narrow terminals so the box can never exceed the
+# window — gum style would otherwise wrap the border into the next column.
+[ "$PANEL_WIDTH" -gt "$TERM_COLS" ] && PANEL_WIDTH="$TERM_COLS"
+PANEL_MARGIN=$(( (TERM_COLS - PANEL_WIDTH) / 2 ))
+[ "$PANEL_MARGIN" -lt 0 ] && PANEL_MARGIN=0
+# Reusable indent string for rows gum doesn't know how to position itself
+# (menu items, header labels, success/error lines).
+PANEL_INDENT="$(printf '%*s' "$PANEL_MARGIN" '')"
+
+# Vertical centering: estimate the total rows the centered block occupies
+# (panel ≈ 9, gap 1, label 1, hint 1, ~5 menu rows = ~17). The top pad is
+# half the slack between the terminal height and that estimate, clamped to
+# ≥0 so tiny floating windows still show everything.
+EST_CONTENT_ROWS=17
+TOP_PAD_ROWS=$(( (TERM_ROWS - EST_CONTENT_ROWS) / 2 ))
+[ "$TOP_PAD_ROWS" -lt 0 ] && TOP_PAD_ROWS=0
+
+# Clear and push the cursor down before each interactive gum prompt so the
+# rendered UI sits vertically centered. Without this, gum draws at the
+# current cursor position (top of window on first call, then below previous
+# output as the user navigates) and the panel looks lost in dead space.
+center_screen() {
+  printf '\033[2J\033[H'
+  local i
+  for ((i = 0; i < TOP_PAD_ROWS; i++)); do printf '\n'; done
+}
+
+# Push the loaded theme into gum's own widget chrome (cursor, selected item,
+# headers, prompts, confirm buttons). Without this, gum keeps its built-in
+# pink/cyan defaults regardless of $COLOR_* values, so the menu cursor and
+# highlighted row never follow the system theme.
+export GUM_CHOOSE_CURSOR_FOREGROUND="$COLOR_ACCENT"
+export GUM_CHOOSE_SELECTED_FOREGROUND="$COLOR_ACCENT"
+export GUM_CHOOSE_HEADER_FOREGROUND="$COLOR_ACCENT"
+export GUM_CONFIRM_PROMPT_FOREGROUND="$COLOR_ACCENT"
+export GUM_CONFIRM_SELECTED_BACKGROUND="$COLOR_ACCENT"
+export GUM_CONFIRM_SELECTED_FOREGROUND="$COLOR_MUTED"
+export GUM_INPUT_PROMPT_FOREGROUND="$COLOR_ACCENT"
+export GUM_INPUT_CURSOR_FOREGROUND="$COLOR_ACCENT"
+export GUM_FILE_HEADER_FOREGROUND="$COLOR_ACCENT"
+export GUM_FILTER_INDICATOR_FOREGROUND="$COLOR_ACCENT"
+export GUM_FILTER_HEADER_FOREGROUND="$COLOR_ACCENT"
+export GUM_SPIN_SPINNER_FOREGROUND="$COLOR_ACCENT"
+# Pad gum's cursor with the panel's left margin so the menu items render at
+# the same column as the centered panel above them. Inactive rows are padded
+# automatically to match the cursor's printable width.
+export GUM_CHOOSE_CURSOR="${PANEL_INDENT}> "
+# Hide gum's built-in help footer — it renders flush-left and can't be
+# indented. We draw our own centered hint as part of prompt_header instead.
+export GUM_CHOOSE_SHOW_HELP=false
+export GUM_FILTER_SHOW_HELP=false
+export GUM_FILE_SHOW_HELP=false
+
+# ===== user-facing strings ====================================================
+# All copy lives here so the wording can be retuned without hunting through
+# the action handlers. Format strings use printf-style %s; menu items must
+# match verbatim because case branches compare against them.
+
+# Header panel labels + values
+TXT_TITLE="◐ $APP_NAME"
+TXT_LBL_STATUS="status:   "
+TXT_LBL_TARGET="target:   "
+TXT_LBL_VIDEO="video:    "
+TXT_LBL_AUTO="autostart:"
+TXT_VAL_RUNNING="running"
+TXT_VAL_STOPPED="stopped"
+TXT_VAL_NONE="(none)"
+TXT_VAL_AUTO_ON="enabled"
+TXT_VAL_AUTO_OFF="disabled"
+
+# Menu / picker headers
+TXT_HDR_MAIN="What would you like to do?"
+TXT_HDR_MONITOR="Select a monitor"
+TXT_HDR_LIBRARY_FMT="Choose a video from %s"
+TXT_HDR_BROWSE_FMT="Browse: %s"
+
+# Menu items (used in case branches → keep verbatim)
+TXT_BTN_STOP="Stop motion wallpaper"
+TXT_BTN_CHANGE="Change video"
+TXT_BTN_PICK="Pick a video and start"
+TXT_BTN_AUTOSTART_ON="Turn autostart ON"
+TXT_BTN_AUTOSTART_OFF="Turn autostart OFF"
+TXT_BTN_CANCEL="Cancel"
+TXT_BTN_START_FMT="Start with %s"
+TXT_BTN_ALL_MONITORS="All monitors"
+TXT_BTN_UP="── Up one folder ──"
+TXT_BTN_BROWSE="── Browse filesystem… ──"
+
+# Confirms
+TXT_CONFIRM_DISABLE_AUTOSTART="Autostart is still enabled — also disable it so the wallpaper doesn't resume after reboot?"
+TXT_CONFIRM_STOP_RUNNING="Motion wallpaper is still running — stop it now too?"
+TXT_CONFIRM_OFFER_AUTOSTART="Start motion wallpaper automatically after login / reboot?"
+
+# Success messages
+TXT_OK_STOPPED="Stopped. Normal wallpaper restored."
+TXT_OK_SWAPPED_FMT="Swapped to %s."
+TXT_OK_STARTED_FMT="Started %s on %s."
+TXT_OK_AUTOSTART_ON="Autostart enabled."
+TXT_OK_AUTOSTART_ON_REBOOT="Autostart enabled — wallpaper will resume after reboot."
+TXT_OK_AUTOSTART_ON_LATER="Autostart enabled — wallpaper will resume after reboot (once started)."
+TXT_OK_AUTOSTART_OFF="Autostart disabled."
+
+# Errors
+TXT_ERR_NO_HYPRCTL="hyprctl not found. Are you in Hyprland?"
+TXT_ERR_NO_JQ="jq is not installed."
+TXT_ERR_NO_HIS="HYPRLAND_INSTANCE_SIGNATURE is not set — the launcher didn't inherit the Hyprland session. Try running motion-wallpaper-toggle from a regular terminal."
+TXT_ERR_HYPRCTL_FMT="Could not read monitors from hyprctl. See %s."
+TXT_ERR_NO_UNIT="motion-wallpaper.service is not installed. Re-run wallpaper.sh."
+TXT_ERR_AUTOSTART_FAIL="Failed to enable autostart (systemctl error)."
+TXT_ERR_FILE_FMT="File not found: %s"
+TXT_ERR_NOT_RUNNING="Motion wallpaper is not running."
+TXT_ERR_MPVP_FMT="mpvpaper failed to start. See %s for details."
+TXT_ERR_EMPTY_DIR="No subfolders or videos in this folder."
+
+# Notifications
+TXT_NOTIFY_STARTED_FMT="Motion wallpaper started on %s."
+TXT_NOTIFY_STOPPED="Motion wallpaper stopped."
+TXT_NOTIFY_UPDATED="Motion wallpaper updated."
+
+# Misc
+TXT_PRESS_ENTER="Press enter to close…"
+TXT_HINT_NAV="↑/↓ navigate  ·  enter select  ·  esc cancel"
+
+# Backwards-compat alias used by pick_video's "browse" sentinel match.
+BROWSE_SENTINEL="$TXT_BTN_BROWSE"
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 
@@ -66,16 +220,16 @@ MSG
 }
 
 tui_err() {
-  gum style --foreground="$COLOR_ERROR" --bold "ERROR: $1"
+  gum style --margin="0 $PANEL_MARGIN" --foreground="$COLOR_ERROR" --bold "ERROR: $1"
   log "ERROR: $1"
   # Hold the terminal open so launcher-spawned windows don't flash away.
   if [ -t 0 ]; then
-    gum input --placeholder="Press enter to close…" >/dev/null 2>&1 || true
+    gum input --placeholder="$TXT_PRESS_ENTER" >/dev/null 2>&1 || true
   fi
 }
 
 tui_ok() {
-  gum style --foreground="$COLOR_OK" "✓ $1"
+  gum style --margin="0 $PANEL_MARGIN" --foreground="$COLOR_OK" "✓ $1"
   log "$1"
 }
 
@@ -138,11 +292,11 @@ autostart_enabled() {
 
 autostart_enable() {
   if ! autostart_installed; then
-    tui_err "motion-wallpaper.service is not installed. Re-run wallpaper.sh."
+    tui_err "$TXT_ERR_NO_UNIT"
     return 1
   fi
   if ! systemctl --user enable motion-wallpaper.service >/dev/null 2>&1; then
-    tui_err "Failed to enable autostart (systemctl error)."
+    tui_err "$TXT_ERR_AUTOSTART_FAIL"
     return 1
   fi
   log "autostart enabled"
@@ -154,29 +308,64 @@ autostart_disable() {
   log "autostart disabled"
 }
 
-show_header() {
+# Returns the status panel as a string. Used both as a stand-alone display
+# (action_status / show_header) and as the --header of gum prompts so the
+# status stays visible while the user interacts in a small floating window.
+header_text() {
   load_state
   local status_line target_line video_line autostart_line
   if is_running; then
-    status_line="status:    $(gum style --foreground="$COLOR_OK" running)"
+    status_line="$TXT_LBL_STATUS $(gum style --foreground="$COLOR_OK" "$TXT_VAL_RUNNING")"
   else
-    status_line="status:    $(gum style --foreground="$COLOR_MUTED" stopped)"
+    status_line="$TXT_LBL_STATUS $(gum style --foreground="$COLOR_MUTED" "$TXT_VAL_STOPPED")"
   fi
-  target_line="target:    ${LAST_TARGET:-$(gum style --foreground="$COLOR_MUTED" --italic '(none)')}"
-  video_line="video:     ${LAST_VIDEO:-$(gum style --foreground="$COLOR_MUTED" --italic '(none)')}"
+  target_line="$TXT_LBL_TARGET ${LAST_TARGET:-$(gum style --foreground="$COLOR_MUTED" --italic "$TXT_VAL_NONE")}"
+  video_line="$TXT_LBL_VIDEO ${LAST_VIDEO:-$(gum style --foreground="$COLOR_MUTED" --italic "$TXT_VAL_NONE")}"
   if autostart_enabled; then
-    autostart_line="autostart: $(gum style --foreground="$COLOR_OK" enabled)"
+    autostart_line="$TXT_LBL_AUTO $(gum style --foreground="$COLOR_OK" "$TXT_VAL_AUTO_ON")"
   else
-    autostart_line="autostart: $(gum style --foreground="$COLOR_MUTED" disabled)"
+    autostart_line="$TXT_LBL_AUTO $(gum style --foreground="$COLOR_MUTED" "$TXT_VAL_AUTO_OFF")"
   fi
+  # Title centered, data lines left-aligned with consistent label indent —
+  # the box itself is shifted right by PANEL_MARGIN so it sits centered in
+  # the floating window.
+  local title_block
+  title_block="$(gum style --align=center --width=$((PANEL_WIDTH - 4)) \
+                  --bold --foreground="$COLOR_ACCENT" "$TXT_TITLE")"
   gum style --border=rounded --border-foreground="$COLOR_ACCENT" \
-            --padding="1 2" --margin="1 0" \
-            "$(gum style --bold --foreground="$COLOR_ACCENT" "◐ $APP_NAME")" \
+            --padding="0 2" --width="$PANEL_WIDTH" \
+            --margin="0 $PANEL_MARGIN" \
+            "$title_block" \
             "" \
             "$status_line" \
             "$target_line" \
             "$video_line" \
             "$autostart_line"
+}
+
+show_header() {
+  header_text
+}
+
+# Build a multi-line --header value combining the persistent status panel
+# (TUI_HEADER, set once per interactive session) with a per-prompt label
+# and a centered, muted navigation hint that replaces gum's flush-left
+# default footer (which can't be indented). All three lines line up with
+# the panel's left edge via PANEL_INDENT.
+prompt_header() {
+  local label="$1"
+  local hint
+  hint="$(gum style --foreground="$COLOR_MUTED" --italic "$TXT_HINT_NAV")"
+  if [ -n "${TUI_HEADER:-}" ]; then
+    printf '%s\n\n%s%s\n%s%s' \
+      "$TUI_HEADER" \
+      "$PANEL_INDENT" "$label" \
+      "$PANEL_INDENT" "$hint"
+  else
+    printf '%s%s\n%s%s' \
+      "$PANEL_INDENT" "$label" \
+      "$PANEL_INDENT" "$hint"
+  fi
 }
 
 # ===== selection ==============================================================
@@ -236,15 +425,15 @@ get_monitors() {
 }
 
 pick_target() {
-  command -v hyprctl >/dev/null || { tui_err "hyprctl not found. Are you in Hyprland?"; return 1; }
-  command -v jq      >/dev/null || { tui_err "jq is not installed.";                     return 1; }
+  command -v hyprctl >/dev/null || { tui_err "$TXT_ERR_NO_HYPRCTL"; return 1; }
+  command -v jq      >/dev/null || { tui_err "$TXT_ERR_NO_JQ";      return 1; }
 
   local monitors
   if ! monitors="$(get_monitors)" || [ -z "$monitors" ]; then
     if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
-      tui_err "HYPRLAND_INSTANCE_SIGNATURE is not set — the launcher didn't inherit the Hyprland session. Try running motion-wallpaper-toggle from a regular terminal."
+      tui_err "$TXT_ERR_NO_HIS"
     else
-      tui_err "Could not read monitors from hyprctl. See $LOG_FILE."
+      tui_err "$(printf "$TXT_ERR_HYPRCTL_FMT" "$LOG_FILE")"
     fi
     return 1
   fi
@@ -257,10 +446,11 @@ pick_target() {
   fi
 
   local selected
-  selected=$( { echo "All monitors"; printf '%s\n' "$monitors"; } \
-    | gum choose --header="Select a monitor") || return 1
+  center_screen
+  selected=$( { echo "$TXT_BTN_ALL_MONITORS"; printf '%s\n' "$monitors"; } \
+    | gum choose --header="$(prompt_header "$TXT_HDR_MONITOR")") || return 1
 
-  if [ "$selected" = "All monitors" ]; then
+  if [ "$selected" = "$TXT_BTN_ALL_MONITORS" ]; then
     printf '%s' '*'
   else
     printf '%s' "$selected"
@@ -268,18 +458,66 @@ pick_target() {
 }
 
 browse_filesystem() {
-  # Start gum file at the last directory we successfully picked from, so
-  # changing videos returns the user to where they were. Falls back to the
-  # last video's dirname (for state files pre-dating LAST_DIR), then $HOME.
+  # Custom browser built on gum choose so we can hard-confine navigation to
+  # $HOME — gum file exposes a built-in "up" key we can't intercept, which
+  # let users wander above $HOME by mistake. By owning the entry list, the
+  # "Up one folder" item simply isn't offered at $HOME, so escape is impossible.
+  # Side benefit: gum choose stays in the main screen (no alt-screen takeover),
+  # so the status panel remains visible the whole way through.
   load_state
-  local start_dir="${LAST_DIR:-}"
-  if [ -z "$start_dir" ] && [ -n "${LAST_VIDEO:-}" ]; then
-    start_dir="$(dirname "$LAST_VIDEO")"
+  local cur="${LAST_DIR:-}"
+  if [ -z "$cur" ] && [ -n "${LAST_VIDEO:-}" ]; then
+    cur="$(dirname "$LAST_VIDEO")"
   fi
-  if [ -z "$start_dir" ] || [ ! -d "$start_dir" ]; then
-    start_dir="$HOME"
-  fi
-  gum file --height=20 "$start_dir"
+  case "$cur" in
+    "$HOME"|"$HOME"/*) : ;;
+    *) cur="$HOME" ;;
+  esac
+  [ -d "$cur" ] || cur="$HOME"
+
+  local entries name rel label choice
+
+  while true; do
+    entries=()
+    [ "$cur" != "$HOME" ] && entries+=("$TXT_BTN_UP")
+
+    # Directories first (skip hidden), then video files (skip hidden).
+    while IFS= read -r -d '' name; do
+      entries+=("$(basename "$name")/")
+    done < <(find "$cur" -mindepth 1 -maxdepth 1 -type d ! -name '.*' \
+      -print0 2>/dev/null | sort -z)
+
+    while IFS= read -r -d '' name; do
+      entries+=("$(basename "$name")")
+    done < <(find "$cur" -mindepth 1 -maxdepth 1 -type f ! -name '.*' \
+      \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' \
+         -o -iname '*.mov' -o -iname '*.avi' \) \
+      -print0 2>/dev/null | sort -z)
+
+    if [ ${#entries[@]} -eq 0 ]; then
+      gum style --margin="0 $PANEL_MARGIN" --foreground="$COLOR_ERROR" "$TXT_ERR_EMPTY_DIR"
+      # Bounce back to $HOME instead of getting stuck on an empty leaf.
+      # If $HOME itself is empty we'd loop forever, so bail with an error.
+      if [ "$cur" = "$HOME" ]; then
+        return 1
+      fi
+      cur="$HOME"
+      continue
+    fi
+
+    rel="${cur#"$HOME"}"; [ -z "$rel" ] && rel="/"
+    label="$(printf "$TXT_HDR_BROWSE_FMT" "~$rel")"
+
+    center_screen
+    choice=$(printf '%s\n' "${entries[@]}" \
+      | gum choose --height=20 --header="$(prompt_header "$label")") || return 1
+
+    case "$choice" in
+      "$TXT_BTN_UP") cur="$(dirname "$cur")" ;;
+      */)            cur="$cur/${choice%/}"  ;;
+      *)             printf '%s' "$cur/$choice"; return 0 ;;
+    esac
+  done
 }
 
 pick_video() {
@@ -304,10 +542,11 @@ pick_video() {
   done
 
   local choice
-  choice=$( { printf '%s\n' "${basenames[@]}"; echo "$BROWSE_SENTINEL"; } \
-    | gum choose --header="Choose a video from $LIBRARY_DIR") || return 1
+  center_screen
+  choice=$( { printf '%s\n' "${basenames[@]}"; echo "$TXT_BTN_BROWSE"; } \
+    | gum choose --header="$(prompt_header "$(printf "$TXT_HDR_LIBRARY_FMT" "$LIBRARY_DIR")")") || return 1
 
-  if [ "$choice" = "$BROWSE_SENTINEL" ]; then
+  if [ "$choice" = "$TXT_BTN_BROWSE" ]; then
     browse_filesystem
   else
     printf '%s' "$LIBRARY_DIR/$choice"
@@ -427,7 +666,7 @@ start_mpvpaper_bg() {
   start_watcher
   sleep 0.8
   if ! is_running; then
-    tui_err "mpvpaper failed to start. See $LOG_FILE for details."
+    tui_err "$(printf "$TXT_ERR_MPVP_FMT" "$LOG_FILE")"
     return 1
   fi
 }
@@ -453,82 +692,133 @@ action_toggle() {
   require_gum
   require_tty
 
+  # Render the status panel once and reuse it as the --header of every gum
+  # prompt below, so it stays visible while the user makes choices in a
+  # small floating window (instead of flashing past on first paint).
+  TUI_HEADER="$(header_text)"
+
   if is_running; then
-    show_header
     local autostart_label
     if autostart_enabled; then
-      autostart_label="Turn autostart OFF"
+      autostart_label="$TXT_BTN_AUTOSTART_OFF"
     else
-      autostart_label="Turn autostart ON"
+      autostart_label="$TXT_BTN_AUTOSTART_ON"
     fi
     local choice
-    choice=$(gum choose --header="What would you like to do?" \
-      "Stop motion wallpaper" "Change video" "$autostart_label" "Cancel") || exit 0
+    center_screen
+    choice=$(gum choose --header="$(prompt_header "$TXT_HDR_MAIN")" \
+      "$TXT_BTN_STOP" "$TXT_BTN_CHANGE" "$autostart_label" "$TXT_BTN_CANCEL") || exit 0
 
     case "$choice" in
-      "Stop motion wallpaper")
+      "$TXT_BTN_STOP")
         stop_mpvpaper
-        tui_ok "Stopped. Normal wallpaper restored."
-        notify "Motion wallpaper stopped."
+        tui_ok "$TXT_OK_STOPPED"
+        notify "$TXT_NOTIFY_STOPPED"
         # If autostart is on, a plain stop will let the wallpaper return on
         # next reboot. Offer to turn autostart off so "stop" means "stop".
         if autostart_enabled; then
-          if gum confirm "Autostart is still enabled — also disable it so the wallpaper doesn't resume after reboot?"; then
+          if gum confirm "$TXT_CONFIRM_DISABLE_AUTOSTART"; then
             autostart_disable
-            tui_ok "Autostart disabled."
+            tui_ok "$TXT_OK_AUTOSTART_OFF"
           fi
         fi
         ;;
-      "Change video")
+      "$TXT_BTN_CHANGE")
         load_state
         local video
         video=$(pick_video) || exit 0
         [ -z "$video" ]  && exit 0
-        [ -f "$video" ]  || { tui_err "File not found: $video"; exit 1; }
+        [ -f "$video" ]  || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; exit 1; }
         save_state "$video" "$LAST_TARGET"
         start_mpvpaper_bg "$LAST_TARGET" "$video" || exit 1
-        tui_ok "Swapped to $(basename "$video")."
-        notify "Motion wallpaper updated."
+        tui_ok "$(printf "$TXT_OK_SWAPPED_FMT" "$(basename "$video")")"
+        notify "$TXT_NOTIFY_UPDATED"
         ;;
-      "Turn autostart ON")
-        autostart_enable && tui_ok "Autostart enabled — wallpaper will resume after reboot."
+      "$TXT_BTN_AUTOSTART_ON")
+        autostart_enable && tui_ok "$TXT_OK_AUTOSTART_ON_REBOOT"
         ;;
-      "Turn autostart OFF")
+      "$TXT_BTN_AUTOSTART_OFF")
         autostart_disable
-        tui_ok "Autostart disabled."
+        tui_ok "$TXT_OK_AUTOSTART_OFF"
         # Motion wallpaper is still running at this point. Offer to also stop
         # it now so the label "turn off" matches visible behaviour.
         if is_running; then
-          if gum confirm "Motion wallpaper is still running — stop it now too?"; then
+          if gum confirm "$TXT_CONFIRM_STOP_RUNNING"; then
             stop_mpvpaper
-            tui_ok "Stopped. Normal wallpaper restored."
-            notify "Motion wallpaper stopped."
+            tui_ok "$TXT_OK_STOPPED"
+            notify "$TXT_NOTIFY_STOPPED"
           fi
         fi
         ;;
-      Cancel) exit 0 ;;
+      "$TXT_BTN_CANCEL") exit 0 ;;
     esac
     return 0
   fi
 
-  show_header
-  local target video
-  target=$(pick_target) || exit 0
-  [ -z "$target" ] && exit 0
-  video=$(pick_video) || exit 0
-  [ -z "$video" ]  && exit 0
-  [ -f "$video" ]  || { tui_err "File not found: $video"; exit 1; }
+  # Stopped state: show a gum-choose menu first instead of dumping the user
+  # straight into the (alt-screen) file picker. Keeps the status panel
+  # visible and lets them reuse a saved video, toggle autostart, or back out
+  # without committing to a file pick.
+  load_state
+  local options=()
+  local last_label=""
+  if [ -n "${LAST_VIDEO:-}" ] && [ -f "${LAST_VIDEO:-}" ]; then
+    last_label="$(printf "$TXT_BTN_START_FMT" "$(basename "$LAST_VIDEO")")"
+    options+=("$last_label")
+  fi
+  options+=("$TXT_BTN_PICK")
+  if autostart_installed; then
+    if autostart_enabled; then
+      options+=("$TXT_BTN_AUTOSTART_OFF")
+    else
+      options+=("$TXT_BTN_AUTOSTART_ON")
+    fi
+  fi
+  options+=("$TXT_BTN_CANCEL")
 
-  save_state "$video" "$target"
-  start_mpvpaper_bg "$target" "$video" || exit 1
-  tui_ok "Started $(basename "$video") on $target."
-  notify "Motion wallpaper started on $target."
+  local choice
+  center_screen
+  choice=$(gum choose --header="$(prompt_header "$TXT_HDR_MAIN")" "${options[@]}") || exit 0
+
+  local target video
+  case "$choice" in
+    "$last_label")
+      [ -n "$last_label" ] || exit 0
+      target=$(pick_target) || exit 0
+      [ -z "$target" ] && exit 0
+      save_state "$LAST_VIDEO" "$target"
+      start_mpvpaper_bg "$target" "$LAST_VIDEO" || exit 1
+      tui_ok "$(printf "$TXT_OK_STARTED_FMT" "$(basename "$LAST_VIDEO")" "$target")"
+      notify "$(printf "$TXT_NOTIFY_STARTED_FMT" "$target")"
+      ;;
+    "$TXT_BTN_PICK")
+      target=$(pick_target) || exit 0
+      [ -z "$target" ] && exit 0
+      video=$(pick_video) || exit 0
+      [ -z "$video" ]  && exit 0
+      [ -f "$video" ]  || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; exit 1; }
+      save_state "$video" "$target"
+      start_mpvpaper_bg "$target" "$video" || exit 1
+      tui_ok "$(printf "$TXT_OK_STARTED_FMT" "$(basename "$video")" "$target")"
+      notify "$(printf "$TXT_NOTIFY_STARTED_FMT" "$target")"
+      ;;
+    "$TXT_BTN_AUTOSTART_ON")
+      autostart_enable && tui_ok "$TXT_OK_AUTOSTART_ON_LATER"
+      return 0
+      ;;
+    "$TXT_BTN_AUTOSTART_OFF")
+      autostart_disable
+      tui_ok "$TXT_OK_AUTOSTART_OFF"
+      return 0
+      ;;
+    "$TXT_BTN_CANCEL"|*) exit 0 ;;
+  esac
 
   # Offer autostart on first fresh start (skipped silently if already on or
   # if the systemd unit isn't installed).
   if autostart_installed && ! autostart_enabled; then
-    if gum confirm "Start motion wallpaper automatically after login / reboot?"; then
-      autostart_enable && tui_ok "Autostart enabled."
+    if gum confirm "$TXT_CONFIRM_OFFER_AUTOSTART"; then
+      autostart_enable && tui_ok "$TXT_OK_AUTOSTART_ON"
     fi
   fi
 }
@@ -537,18 +827,19 @@ action_change() {
   require_gum
   require_tty
   if ! is_running; then
-    tui_err "Motion wallpaper is not running."
+    tui_err "$TXT_ERR_NOT_RUNNING"
     exit 1
   fi
   load_state
+  TUI_HEADER="$(header_text)"
   local video
   video=$(pick_video) || exit 0
   [ -z "$video" ]  && exit 0
-  [ -f "$video" ]  || { tui_err "File not found: $video"; exit 1; }
+  [ -f "$video" ]  || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; exit 1; }
   save_state "$video" "$LAST_TARGET"
   start_mpvpaper_bg "$LAST_TARGET" "$video" || exit 1
-  tui_ok "Swapped to $(basename "$video")."
-  notify "Motion wallpaper updated."
+  tui_ok "$(printf "$TXT_OK_SWAPPED_FMT" "$(basename "$video")")"
+  notify "$TXT_NOTIFY_UPDATED"
 }
 
 action_start() {
