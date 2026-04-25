@@ -59,45 +59,13 @@ load_theme_colors() {
 }
 load_theme_colors
 
-# ===== layout =================================================================
-# Center the status panel horizontally in the floating window. gum style's
-# --margin shifts the whole box right; we compute the side margin from the
-# real terminal width (tput cols) so the panel sits centered regardless of
-# how the user has sized the floating window.
-TERM_COLS="$(tput cols 2>/dev/null || echo "${COLUMNS:-80}")"
-TERM_ROWS="$(tput lines 2>/dev/null || echo "${LINES:-24}")"
+# ===== layout + gum theming ===================================================
+# Horizontal centering: compute a left-margin for the panel from the live
+# terminal width, recomputed on every show_panel call (handled inside the
+# function, not at script load) so floating-window resize is picked up.
+# Menu items also get the same indent via GUM_CHOOSE_CURSOR.
 PANEL_WIDTH=52
-# Clamp panel width on narrow terminals so the box can never exceed the
-# window — gum style would otherwise wrap the border into the next column.
-[ "$PANEL_WIDTH" -gt "$TERM_COLS" ] && PANEL_WIDTH="$TERM_COLS"
-PANEL_MARGIN=$(( (TERM_COLS - PANEL_WIDTH) / 2 ))
-[ "$PANEL_MARGIN" -lt 0 ] && PANEL_MARGIN=0
-# Reusable indent string for rows gum doesn't know how to position itself
-# (menu items, header labels, success/error lines).
-PANEL_INDENT="$(printf '%*s' "$PANEL_MARGIN" '')"
 
-# Vertical centering: estimate the total rows the centered block occupies
-# (panel ≈ 9, gap 1, label 1, hint 1, ~5 menu rows = ~17). The top pad is
-# half the slack between the terminal height and that estimate, clamped to
-# ≥0 so tiny floating windows still show everything.
-EST_CONTENT_ROWS=17
-TOP_PAD_ROWS=$(( (TERM_ROWS - EST_CONTENT_ROWS) / 2 ))
-[ "$TOP_PAD_ROWS" -lt 0 ] && TOP_PAD_ROWS=0
-
-# Clear and push the cursor down before each interactive gum prompt so the
-# rendered UI sits vertically centered. Without this, gum draws at the
-# current cursor position (top of window on first call, then below previous
-# output as the user navigates) and the panel looks lost in dead space.
-center_screen() {
-  printf '\033[2J\033[H'
-  local i
-  for ((i = 0; i < TOP_PAD_ROWS; i++)); do printf '\n'; done
-}
-
-# Push the loaded theme into gum's own widget chrome (cursor, selected item,
-# headers, prompts, confirm buttons). Without this, gum keeps its built-in
-# pink/cyan defaults regardless of $COLOR_* values, so the menu cursor and
-# highlighted row never follow the system theme.
 export GUM_CHOOSE_CURSOR_FOREGROUND="$COLOR_ACCENT"
 export GUM_CHOOSE_SELECTED_FOREGROUND="$COLOR_ACCENT"
 export GUM_CHOOSE_HEADER_FOREGROUND="$COLOR_ACCENT"
@@ -110,26 +78,47 @@ export GUM_FILE_HEADER_FOREGROUND="$COLOR_ACCENT"
 export GUM_FILTER_INDICATOR_FOREGROUND="$COLOR_ACCENT"
 export GUM_FILTER_HEADER_FOREGROUND="$COLOR_ACCENT"
 export GUM_SPIN_SPINNER_FOREGROUND="$COLOR_ACCENT"
-# Pad gum's cursor with the panel's left margin so the menu items render at
-# the same column as the centered panel above them. Inactive rows are padded
-# automatically to match the cursor's printable width.
-export GUM_CHOOSE_CURSOR="${PANEL_INDENT}> "
-# Hide gum's built-in help footer — it renders flush-left and can't be
-# indented. We draw our own centered hint as part of prompt_header instead.
+
+# gum's built-in help footer (e.g. "↑↓ navigate · enter submit") renders
+# flush-left and there's no flag to indent it, so it visually mismatches
+# the centered panel and indented menu cursor. Hide it; users know the
+# arrow-key convention from every other gum-based TUI on the system.
 export GUM_CHOOSE_SHOW_HELP=false
 export GUM_FILTER_SHOW_HELP=false
 export GUM_FILE_SHOW_HELP=false
+
+# Compute the left margin needed to horizontally center a PANEL_WIDTH box
+# inside the terminal. Recomputed on each call so resizes are picked up.
+panel_margin() {
+  local cols
+  cols="$(tput cols 2>/dev/null || echo "${COLUMNS:-80}")"
+  local m=$(( (cols - PANEL_WIDTH) / 2 ))
+  [ "$m" -lt 0 ] && m=0
+  printf '%s' "$m"
+}
+
+# Build a string of N spaces (the panel's left margin) so callers can
+# prepend it to gum --header values to keep labels aligned with the
+# centered panel above them.
+panel_indent() {
+  local m
+  m="$(panel_margin)"
+  printf '%*s' "$m" ''
+}
 
 # ===== user-facing strings ====================================================
 # All copy lives here so the wording can be retuned without hunting through
 # the action handlers. Format strings use printf-style %s; menu items must
 # match verbatim because case branches compare against them.
 
-# Header panel labels + values
+# Header panel labels + values. Labels are LEFT-padded so the colons line up
+# vertically inside the box (autostart: is the longest at 10 chars, shorter
+# labels get leading spaces to match). Values follow after a single space, so
+# both the colons and the values end up column-aligned.
 TXT_TITLE="◐ $APP_NAME"
-TXT_LBL_STATUS="status:   "
-TXT_LBL_TARGET="target:   "
-TXT_LBL_VIDEO="video:    "
+TXT_LBL_STATUS="   status:"
+TXT_LBL_TARGET="   target:"
+TXT_LBL_VIDEO="    video:"
 TXT_LBL_AUTO="autostart:"
 TXT_VAL_RUNNING="running"
 TXT_VAL_STOPPED="stopped"
@@ -188,7 +177,6 @@ TXT_NOTIFY_UPDATED="Motion wallpaper updated."
 
 # Misc
 TXT_PRESS_ENTER="Press enter to close…"
-TXT_HINT_NAV="↑/↓ navigate  ·  enter select  ·  esc cancel"
 
 # Backwards-compat alias used by pick_video's "browse" sentinel match.
 BROWSE_SENTINEL="$TXT_BTN_BROWSE"
@@ -219,8 +207,22 @@ MSG
   fi
 }
 
+# Restore terminal state on exit. gum widgets occasionally leave the terminal
+# in alt-screen / hidden-cursor mode (especially when interrupted or when the
+# script exits before gum has fully torn down its UI), which can leave the
+# launcher-spawned floating window blank with a frozen cursor that won't
+# accept input. Resetting the cursor + screen on every exit eliminates that.
+restore_terminal() {
+  tput cnorm 2>/dev/null || true   # cursor normal (visible, not blinking-only-state)
+  tput rmcup 2>/dev/null || true   # leave alt-screen if gum entered it
+}
+trap restore_terminal EXIT
+
 tui_err() {
-  gum style --margin="0 $PANEL_MARGIN" --foreground="$COLOR_ERROR" --bold "ERROR: $1"
+  # Display goes to stderr so callers running tui_err inside $(...) (e.g.
+  # pick_target's failure path) don't capture the styled error string into
+  # their return value.
+  gum style --foreground="$COLOR_ERROR" --bold "ERROR: $1" >&2
   log "ERROR: $1"
   # Hold the terminal open so launcher-spawned windows don't flash away.
   if [ -t 0 ]; then
@@ -229,8 +231,12 @@ tui_err() {
 }
 
 tui_ok() {
-  gum style --margin="0 $PANEL_MARGIN" --foreground="$COLOR_OK" "✓ $1"
+  gum style --foreground="$COLOR_OK" "✓ $1" >&2
   log "$1"
+  # Brief pause so the success line stays on screen long enough to read
+  # before action_toggle's loop calls show_panel and clears the screen for
+  # the next menu render. Without this, success feedback flashes by.
+  sleep 0.8
 }
 
 notify() {
@@ -265,15 +271,35 @@ save_state() {
   # $1 video, $2 target, $3 (optional) last dir — defaults to dirname of $1
   # so the filesystem browser re-opens where the user last landed.
   local dir="${3:-$(dirname "$1")}"
-  umask 077
-  # Atomic write: avoids leaving a truncated file if the process dies mid-cat.
   local tmp="$STATE_FILE.tmp"
-  cat > "$tmp" <<STATE
+  # Subshell so the umask change doesn't leak to the rest of the script.
+  # Atomic write via tmp + mv — avoids leaving a truncated file if the
+  # process dies mid-write.
+  (
+    umask 077
+    cat > "$tmp" <<STATE
 LAST_VIDEO="$1"
 LAST_TARGET="$2"
 LAST_DIR="$dir"
 STATE
+  )
   mv -f "$tmp" "$STATE_FILE"
+}
+
+# Return 0 if $1 is "*" or matches a currently-attached output. Used to
+# detect when a saved LAST_TARGET no longer exists (e.g. external monitor
+# unplugged between sessions) so callers can re-prompt or bail out cleanly.
+target_is_valid() {
+  local target="$1"
+  [ -z "$target" ] && return 1
+  [ "$target" = '*' ] && return 0
+  local monitors mon
+  monitors="$(get_monitors 2>/dev/null || true)"
+  [ -n "$monitors" ] || return 1
+  while IFS= read -r mon; do
+    [ "$mon" = "$target" ] && return 0
+  done <<< "$monitors"
+  return 1
 }
 
 is_running() {
@@ -309,8 +335,9 @@ autostart_disable() {
 }
 
 # Returns the status panel as a string. Used both as a stand-alone display
-# (action_status / show_header) and as the --header of gum prompts so the
-# status stays visible while the user interacts in a small floating window.
+# (action_status / show_header) and via show_panel above each gum prompt.
+# Compact on purpose (4 data rows, no title, no inner padding) so panel +
+# gum's --header label + menu still fit in narrow floating windows.
 header_text() {
   load_state
   local status_line target_line video_line autostart_line
@@ -320,23 +347,23 @@ header_text() {
     status_line="$TXT_LBL_STATUS $(gum style --foreground="$COLOR_MUTED" "$TXT_VAL_STOPPED")"
   fi
   target_line="$TXT_LBL_TARGET ${LAST_TARGET:-$(gum style --foreground="$COLOR_MUTED" --italic "$TXT_VAL_NONE")}"
-  video_line="$TXT_LBL_VIDEO ${LAST_VIDEO:-$(gum style --foreground="$COLOR_MUTED" --italic "$TXT_VAL_NONE")}"
+  # Show only the video's basename in the panel — the full path was wrapping
+  # to a second row in narrow floating windows and pushing other content off.
+  local video_display=""
+  if [ -n "${LAST_VIDEO:-}" ]; then
+    video_display="$(basename "$LAST_VIDEO")"
+  else
+    video_display="$(gum style --foreground="$COLOR_MUTED" --italic "$TXT_VAL_NONE")"
+  fi
+  video_line="$TXT_LBL_VIDEO $video_display"
   if autostart_enabled; then
     autostart_line="$TXT_LBL_AUTO $(gum style --foreground="$COLOR_OK" "$TXT_VAL_AUTO_ON")"
   else
     autostart_line="$TXT_LBL_AUTO $(gum style --foreground="$COLOR_MUTED" "$TXT_VAL_AUTO_OFF")"
   fi
-  # Title centered, data lines left-aligned with consistent label indent —
-  # the box itself is shifted right by PANEL_MARGIN so it sits centered in
-  # the floating window.
-  local title_block
-  title_block="$(gum style --align=center --width=$((PANEL_WIDTH - 4)) \
-                  --bold --foreground="$COLOR_ACCENT" "$TXT_TITLE")"
   gum style --border=rounded --border-foreground="$COLOR_ACCENT" \
-            --padding="0 2" --width="$PANEL_WIDTH" \
-            --margin="0 $PANEL_MARGIN" \
-            "$title_block" \
-            "" \
+            --padding="0 1" --width="$PANEL_WIDTH" \
+            --margin="0 $(panel_margin)" \
             "$status_line" \
             "$target_line" \
             "$video_line" \
@@ -347,25 +374,32 @@ show_header() {
   header_text
 }
 
-# Build a multi-line --header value combining the persistent status panel
-# (TUI_HEADER, set once per interactive session) with a per-prompt label
-# and a centered, muted navigation hint that replaces gum's flush-left
-# default footer (which can't be indented). All three lines line up with
-# the panel's left edge via PANEL_INDENT.
-prompt_header() {
-  local label="$1"
-  local hint
-  hint="$(gum style --foreground="$COLOR_MUTED" --italic "$TXT_HINT_NAV")"
-  if [ -n "${TUI_HEADER:-}" ]; then
-    printf '%s\n\n%s%s\n%s%s' \
-      "$TUI_HEADER" \
-      "$PANEL_INDENT" "$label" \
-      "$PANEL_INDENT" "$hint"
-  else
-    printf '%s%s\n%s%s' \
-      "$PANEL_INDENT" "$label" \
-      "$PANEL_INDENT" "$hint"
-  fi
+# Print the status panel followed by a blank line, ready for a `gum choose`
+# prompt to render directly below. Output goes to stderr so that callers
+# inside command substitution (pick_target, pick_video, browse_filesystem —
+# whose stdout carries the selected value) don't capture the panel bytes
+# into the result. gum choose itself renders its TUI on stderr too and
+# writes only the selection to stdout, so this matches gum's convention.
+#
+# The leading clear is essential: each prompt in a chained flow (e.g. main
+# menu → pick_target → pick_video) calls show_panel, and without a clear the
+# previous prompt's panel is still on-screen and the new one stacks below it,
+# producing the "duplicate panel" effect. Clear goes to stderr so command
+# substitution can't capture the escape bytes.
+#
+# Side effect: refreshes GUM_CHOOSE_CURSOR so the menu cursor aligns under
+# the centered panel using the live terminal width. The export only takes
+# effect for child gum processes spawned after show_panel returns, which is
+# exactly the order in our prompts (show_panel; gum choose ...).
+show_panel() {
+  tput clear >&2 2>/dev/null || printf '\033[2J\033[H' >&2
+  header_text >&2
+  echo >&2
+  local m
+  m="$(panel_margin)"
+  local indent
+  indent="$(printf '%*s' "$m" '')"
+  export GUM_CHOOSE_CURSOR="${indent}> "
 }
 
 # ===== selection ==============================================================
@@ -440,15 +474,22 @@ pick_target() {
 
   local count
   count="$(printf '%s\n' "$monitors" | wc -l)"
+  if [ "$count" -eq 0 ]; then
+    # get_monitors said success but the list is empty — Hyprland is up but
+    # has zero attached outputs (lid closed on a laptop with no external,
+    # or a transient state). Bail with a clear error.
+    tui_err "$(printf "$TXT_ERR_HYPRCTL_FMT" "$LOG_FILE")"
+    return 1
+  fi
   if [ "$count" -eq 1 ]; then
     printf '%s' "$monitors"
     return 0
   fi
 
   local selected
-  center_screen
+  show_panel
   selected=$( { echo "$TXT_BTN_ALL_MONITORS"; printf '%s\n' "$monitors"; } \
-    | gum choose --header="$(prompt_header "$TXT_HDR_MONITOR")") || return 1
+    | gum choose --header="$(panel_indent)$TXT_HDR_MONITOR") || return 1
 
   if [ "$selected" = "$TXT_BTN_ALL_MONITORS" ]; then
     printf '%s' '*'
@@ -495,7 +536,7 @@ browse_filesystem() {
       -print0 2>/dev/null | sort -z)
 
     if [ ${#entries[@]} -eq 0 ]; then
-      gum style --margin="0 $PANEL_MARGIN" --foreground="$COLOR_ERROR" "$TXT_ERR_EMPTY_DIR"
+      gum style --foreground="$COLOR_ERROR" "$TXT_ERR_EMPTY_DIR" >&2
       # Bounce back to $HOME instead of getting stuck on an empty leaf.
       # If $HOME itself is empty we'd loop forever, so bail with an error.
       if [ "$cur" = "$HOME" ]; then
@@ -508,9 +549,9 @@ browse_filesystem() {
     rel="${cur#"$HOME"}"; [ -z "$rel" ] && rel="/"
     label="$(printf "$TXT_HDR_BROWSE_FMT" "~$rel")"
 
-    center_screen
+    show_panel
     choice=$(printf '%s\n' "${entries[@]}" \
-      | gum choose --height=20 --header="$(prompt_header "$label")") || return 1
+      | gum choose --height=20 --header="$(panel_indent)$label") || return 1
 
     case "$choice" in
       "$TXT_BTN_UP") cur="$(dirname "$cur")" ;;
@@ -542,9 +583,9 @@ pick_video() {
   done
 
   local choice
-  center_screen
+  show_panel
   choice=$( { printf '%s\n' "${basenames[@]}"; echo "$TXT_BTN_BROWSE"; } \
-    | gum choose --header="$(prompt_header "$(printf "$TXT_HDR_LIBRARY_FMT" "$LIBRARY_DIR")")") || return 1
+    | gum choose --header="$(panel_indent)$(printf "$TXT_HDR_LIBRARY_FMT" "$LIBRARY_DIR")") || return 1
 
   if [ "$choice" = "$TXT_BTN_BROWSE" ]; then
     browse_filesystem
@@ -558,6 +599,39 @@ pick_video() {
 kill_static_wallpapers() {
   pkill -x hyprpaper 2>/dev/null || true
   pkill -x swaybg    2>/dev/null || true
+}
+
+# When mpvpaper targets a single monitor, the other outputs are left without a
+# wallpaper layer (kill_static_wallpapers killed swaybg/hyprpaper for all of
+# them). Re-spawn swaybg bound only to the non-target outputs so they keep
+# showing the active Omarchy theme background. No-op when target is "*".
+start_static_on_other_monitors() {
+  local target="$1"
+  [ "$target" = '*' ] && return 0
+
+  local omarchy_bg="$HOME/.config/omarchy/current/background"
+  [ -e "$omarchy_bg" ] || { log "no omarchy bg, skipping per-monitor swaybg"; return 0; }
+
+  local monitors mon
+  monitors="$(get_monitors 2>/dev/null || true)"
+  [ -n "$monitors" ] || return 0
+
+  local args=()
+  while IFS= read -r mon; do
+    [ -n "$mon" ] || continue
+    [ "$mon" = "$target" ] && continue
+    args+=(-o "$mon" -i "$omarchy_bg" -m fill)
+  done <<< "$monitors"
+
+  [ "${#args[@]}" -eq 0 ] && return 0
+
+  log "swaybg on non-target monitors (target=$target): ${args[*]}"
+  if command -v uwsm-app >/dev/null 2>&1; then
+    setsid uwsm-app -- swaybg "${args[@]}" >/dev/null 2>&1 &
+  else
+    setsid swaybg "${args[@]}" >/dev/null 2>&1 &
+  fi
+  disown 2>/dev/null || true
 }
 
 kill_watcher() {
@@ -638,6 +712,7 @@ start_mpvpaper_fg() {
   pkill -x mpvpaper 2>/dev/null || true
   sleep 0.3
   log "systemd start target=$target video=$video"
+  start_static_on_other_monitors "$target"
   start_watcher
   # shellcheck disable=SC2086  # intentional word-splitting on MPV_OPTS
   exec mpvpaper -o "$MPV_OPTS" "$target" "$video"
@@ -649,6 +724,7 @@ start_mpvpaper_bg() {
   pkill -x mpvpaper 2>/dev/null || true
   sleep 0.3
   log "start target=$target video=$video"
+  start_static_on_other_monitors "$target"
   # setsid detaches from the controlling terminal so mpvpaper survives the
   # TUI terminal closing; uwsm-app parents it to the user systemd scope
   # (matches how Omarchy autostarts swaybg). Without both, mpvpaper was
@@ -692,135 +768,143 @@ action_toggle() {
   require_gum
   require_tty
 
-  # Render the status panel once and reuse it as the --header of every gum
-  # prompt below, so it stays visible while the user makes choices in a
-  # small floating window (instead of flashing past on first paint).
-  TUI_HEADER="$(header_text)"
+  # Main interactive loop. After every action (stop, change, toggle autostart,
+  # etc.) we `continue` back here and re-render the menu — running vs. stopped
+  # state is recomputed each pass, so the menu adapts. Only Cancel / Esc
+  # breaks the loop, which falls through to the explicit exit (the EXIT trap
+  # restores cursor + main screen on the way out).
+  while true; do
+    if is_running; then
+      local autostart_label
+      if autostart_enabled; then
+        autostart_label="$TXT_BTN_AUTOSTART_OFF"
+      else
+        autostart_label="$TXT_BTN_AUTOSTART_ON"
+      fi
+      local choice
+      show_panel
+      choice=$(gum choose --header="$(panel_indent)$TXT_HDR_MAIN" \
+        "$TXT_BTN_STOP" "$TXT_BTN_CHANGE" "$autostart_label" "$TXT_BTN_CANCEL") || break
 
-  if is_running; then
-    local autostart_label
-    if autostart_enabled; then
-      autostart_label="$TXT_BTN_AUTOSTART_OFF"
-    else
-      autostart_label="$TXT_BTN_AUTOSTART_ON"
-    fi
-    local choice
-    center_screen
-    choice=$(gum choose --header="$(prompt_header "$TXT_HDR_MAIN")" \
-      "$TXT_BTN_STOP" "$TXT_BTN_CHANGE" "$autostart_label" "$TXT_BTN_CANCEL") || exit 0
-
-    case "$choice" in
-      "$TXT_BTN_STOP")
-        stop_mpvpaper
-        tui_ok "$TXT_OK_STOPPED"
-        notify "$TXT_NOTIFY_STOPPED"
-        # If autostart is on, a plain stop will let the wallpaper return on
-        # next reboot. Offer to turn autostart off so "stop" means "stop".
-        if autostart_enabled; then
-          if gum confirm "$TXT_CONFIRM_DISABLE_AUTOSTART"; then
-            autostart_disable
-            tui_ok "$TXT_OK_AUTOSTART_OFF"
+      case "$choice" in
+        "$TXT_BTN_STOP")
+          stop_mpvpaper
+          tui_ok "$TXT_OK_STOPPED"
+          notify "$TXT_NOTIFY_STOPPED"
+          # If autostart is on, a plain stop will let the wallpaper return on
+          # next reboot. Offer to turn autostart off so "stop" means "stop".
+          if autostart_enabled; then
+            if gum confirm "$TXT_CONFIRM_DISABLE_AUTOSTART"; then
+              autostart_disable
+              tui_ok "$TXT_OK_AUTOSTART_OFF"
+            fi
           fi
-        fi
+          continue
+          ;;
+        "$TXT_BTN_CHANGE")
+          # Pick the new video, then the target monitor — pick_target
+          # auto-skips the prompt on single-monitor systems and shows a
+          # picker (with "All monitors") on multi-monitor setups, so the
+          # user can swap monitors at the same time as the video.
+          load_state
+          local video target
+          video=$(pick_video) || continue
+          [ -z "$video" ] && continue
+          [ -f "$video" ] || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; continue; }
+          target=$(pick_target) || continue
+          [ -z "$target" ] && continue
+          save_state "$video" "$target"
+          start_mpvpaper_bg "$target" "$video" || continue
+          tui_ok "$(printf "$TXT_OK_SWAPPED_FMT" "$(basename "$video")")"
+          notify "$TXT_NOTIFY_UPDATED"
+          continue
+          ;;
+        "$TXT_BTN_AUTOSTART_ON")
+          autostart_enable && tui_ok "$TXT_OK_AUTOSTART_ON_REBOOT"
+          continue
+          ;;
+        "$TXT_BTN_AUTOSTART_OFF")
+          autostart_disable
+          tui_ok "$TXT_OK_AUTOSTART_OFF"
+          # Motion wallpaper is still running at this point. Offer to also
+          # stop it now so the label "turn off" matches visible behaviour.
+          if is_running; then
+            if gum confirm "$TXT_CONFIRM_STOP_RUNNING"; then
+              stop_mpvpaper
+              tui_ok "$TXT_OK_STOPPED"
+              notify "$TXT_NOTIFY_STOPPED"
+            fi
+          fi
+          continue
+          ;;
+        "$TXT_BTN_CANCEL") break ;;
+      esac
+      continue
+    fi
+
+    # Stopped state: show a gum-choose menu first instead of dumping the
+    # user straight into the (alt-screen) file picker. Keeps the status
+    # panel visible and lets them reuse a saved video, toggle autostart,
+    # or back out without committing to a file pick.
+    load_state
+    local options=()
+    local last_label=""
+    if [ -n "${LAST_VIDEO:-}" ] && [ -f "${LAST_VIDEO:-}" ]; then
+      last_label="$(printf "$TXT_BTN_START_FMT" "$(basename "$LAST_VIDEO")")"
+      options+=("$last_label")
+    fi
+    options+=("$TXT_BTN_PICK")
+    if autostart_installed; then
+      if autostart_enabled; then
+        options+=("$TXT_BTN_AUTOSTART_OFF")
+      else
+        options+=("$TXT_BTN_AUTOSTART_ON")
+      fi
+    fi
+    options+=("$TXT_BTN_CANCEL")
+
+    local choice
+    show_panel
+    choice=$(gum choose --header="$(panel_indent)$TXT_HDR_MAIN" "${options[@]}") || break
+
+    local target video
+    case "$choice" in
+      "$last_label")
+        [ -n "$last_label" ] || continue
+        target=$(pick_target) || continue
+        [ -z "$target" ] && continue
+        save_state "$LAST_VIDEO" "$target"
+        start_mpvpaper_bg "$target" "$LAST_VIDEO" || continue
+        tui_ok "$(printf "$TXT_OK_STARTED_FMT" "$(basename "$LAST_VIDEO")" "$target")"
+        notify "$(printf "$TXT_NOTIFY_STARTED_FMT" "$target")"
+        continue
         ;;
-      "$TXT_BTN_CHANGE")
-        load_state
-        local video
-        video=$(pick_video) || exit 0
-        [ -z "$video" ]  && exit 0
-        [ -f "$video" ]  || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; exit 1; }
-        save_state "$video" "$LAST_TARGET"
-        start_mpvpaper_bg "$LAST_TARGET" "$video" || exit 1
-        tui_ok "$(printf "$TXT_OK_SWAPPED_FMT" "$(basename "$video")")"
-        notify "$TXT_NOTIFY_UPDATED"
+      "$TXT_BTN_PICK")
+        target=$(pick_target) || continue
+        [ -z "$target" ] && continue
+        video=$(pick_video) || continue
+        [ -z "$video" ]  && continue
+        [ -f "$video" ]  || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; continue; }
+        save_state "$video" "$target"
+        start_mpvpaper_bg "$target" "$video" || continue
+        tui_ok "$(printf "$TXT_OK_STARTED_FMT" "$(basename "$video")" "$target")"
+        notify "$(printf "$TXT_NOTIFY_STARTED_FMT" "$target")"
+        continue
         ;;
       "$TXT_BTN_AUTOSTART_ON")
-        autostart_enable && tui_ok "$TXT_OK_AUTOSTART_ON_REBOOT"
+        autostart_enable && tui_ok "$TXT_OK_AUTOSTART_ON_LATER"
+        continue
         ;;
       "$TXT_BTN_AUTOSTART_OFF")
         autostart_disable
         tui_ok "$TXT_OK_AUTOSTART_OFF"
-        # Motion wallpaper is still running at this point. Offer to also stop
-        # it now so the label "turn off" matches visible behaviour.
-        if is_running; then
-          if gum confirm "$TXT_CONFIRM_STOP_RUNNING"; then
-            stop_mpvpaper
-            tui_ok "$TXT_OK_STOPPED"
-            notify "$TXT_NOTIFY_STOPPED"
-          fi
-        fi
+        continue
         ;;
-      "$TXT_BTN_CANCEL") exit 0 ;;
+      "$TXT_BTN_CANCEL"|*) break ;;
     esac
-    return 0
-  fi
+  done
 
-  # Stopped state: show a gum-choose menu first instead of dumping the user
-  # straight into the (alt-screen) file picker. Keeps the status panel
-  # visible and lets them reuse a saved video, toggle autostart, or back out
-  # without committing to a file pick.
-  load_state
-  local options=()
-  local last_label=""
-  if [ -n "${LAST_VIDEO:-}" ] && [ -f "${LAST_VIDEO:-}" ]; then
-    last_label="$(printf "$TXT_BTN_START_FMT" "$(basename "$LAST_VIDEO")")"
-    options+=("$last_label")
-  fi
-  options+=("$TXT_BTN_PICK")
-  if autostart_installed; then
-    if autostart_enabled; then
-      options+=("$TXT_BTN_AUTOSTART_OFF")
-    else
-      options+=("$TXT_BTN_AUTOSTART_ON")
-    fi
-  fi
-  options+=("$TXT_BTN_CANCEL")
-
-  local choice
-  center_screen
-  choice=$(gum choose --header="$(prompt_header "$TXT_HDR_MAIN")" "${options[@]}") || exit 0
-
-  local target video
-  case "$choice" in
-    "$last_label")
-      [ -n "$last_label" ] || exit 0
-      target=$(pick_target) || exit 0
-      [ -z "$target" ] && exit 0
-      save_state "$LAST_VIDEO" "$target"
-      start_mpvpaper_bg "$target" "$LAST_VIDEO" || exit 1
-      tui_ok "$(printf "$TXT_OK_STARTED_FMT" "$(basename "$LAST_VIDEO")" "$target")"
-      notify "$(printf "$TXT_NOTIFY_STARTED_FMT" "$target")"
-      ;;
-    "$TXT_BTN_PICK")
-      target=$(pick_target) || exit 0
-      [ -z "$target" ] && exit 0
-      video=$(pick_video) || exit 0
-      [ -z "$video" ]  && exit 0
-      [ -f "$video" ]  || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; exit 1; }
-      save_state "$video" "$target"
-      start_mpvpaper_bg "$target" "$video" || exit 1
-      tui_ok "$(printf "$TXT_OK_STARTED_FMT" "$(basename "$video")" "$target")"
-      notify "$(printf "$TXT_NOTIFY_STARTED_FMT" "$target")"
-      ;;
-    "$TXT_BTN_AUTOSTART_ON")
-      autostart_enable && tui_ok "$TXT_OK_AUTOSTART_ON_LATER"
-      return 0
-      ;;
-    "$TXT_BTN_AUTOSTART_OFF")
-      autostart_disable
-      tui_ok "$TXT_OK_AUTOSTART_OFF"
-      return 0
-      ;;
-    "$TXT_BTN_CANCEL"|*) exit 0 ;;
-  esac
-
-  # Offer autostart on first fresh start (skipped silently if already on or
-  # if the systemd unit isn't installed).
-  if autostart_installed && ! autostart_enabled; then
-    if gum confirm "$TXT_CONFIRM_OFFER_AUTOSTART"; then
-      autostart_enable && tui_ok "$TXT_OK_AUTOSTART_ON"
-    fi
-  fi
+  exit 0
 }
 
 action_change() {
@@ -831,13 +915,18 @@ action_change() {
     exit 1
   fi
   load_state
-  TUI_HEADER="$(header_text)"
-  local video
+  local video target="$LAST_TARGET"
   video=$(pick_video) || exit 0
   [ -z "$video" ]  && exit 0
   [ -f "$video" ]  || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; exit 1; }
-  save_state "$video" "$LAST_TARGET"
-  start_mpvpaper_bg "$LAST_TARGET" "$video" || exit 1
+  # If the saved target no longer exists (monitor unplugged), fall back to
+  # all monitors so the change action still lands somewhere visible.
+  if ! target_is_valid "$target"; then
+    log "change: saved target '$target' not present, falling back to all monitors"
+    target='*'
+  fi
+  save_state "$video" "$target"
+  start_mpvpaper_bg "$target" "$video" || exit 1
   tui_ok "$(printf "$TXT_OK_SWAPPED_FMT" "$(basename "$video")")"
   notify "$TXT_NOTIFY_UPDATED"
 }
@@ -851,6 +940,14 @@ action_start() {
   if [ ! -f "$LAST_VIDEO" ]; then
     log "autostart: saved video missing ($LAST_VIDEO)"
     exit 1
+  fi
+  # Validate the saved target against the live Hyprland output list. If the
+  # monitor was unplugged between sessions we'd otherwise hand mpvpaper a
+  # bogus output name and it would fail at startup; falling back to "*" is
+  # the safest default (covers all currently-connected outputs).
+  if ! target_is_valid "$LAST_TARGET"; then
+    log "autostart: saved target '$LAST_TARGET' not present, falling back to all monitors"
+    LAST_TARGET='*'
   fi
   start_mpvpaper_fg "$LAST_TARGET" "$LAST_VIDEO"
 }
