@@ -322,29 +322,47 @@ kill_static_wallpapers() {
 }
 
 kill_watcher() {
-  pkill -f motion-wallpaper-watcher 2>/dev/null || true
+  pkill -f motion-wallpaper-watcher       2>/dev/null || true
+  pkill -f motion-wallpaper-theme-watcher 2>/dev/null || true
+}
+
+# Locate a sibling script — first in PATH, then in this script's dir. Used
+# for both watchers because launcher-spawned PATH is minimal.
+locate_sibling() {
+  local name="$1" path
+  path="$(command -v "$name" 2>/dev/null || true)"
+  if [ -z "$path" ]; then
+    local self_dir
+    self_dir="$(dirname "$(readlink -f "$0")")"
+    if [ -x "$self_dir/$name" ]; then
+      path="$self_dir/$name"
+    fi
+  fi
+  printf '%s' "$path"
 }
 
 start_watcher() {
-  local watcher
-  # PATH in launcher-spawned terminals is unreliable (minimal systemd env etc),
-  # so fall back to the script's own directory where the installer puts both.
-  watcher="$(command -v motion-wallpaper-watcher 2>/dev/null || true)"
-  if [ -z "$watcher" ]; then
-    local self_dir
-    self_dir="$(dirname "$(readlink -f "$0")")"
-    if [ -x "$self_dir/motion-wallpaper-watcher" ]; then
-      watcher="$self_dir/motion-wallpaper-watcher"
-    fi
-  fi
-  if [ -z "$watcher" ]; then
-    log "watcher binary not found — auto-pause disabled"
-    return 0
-  fi
+  local watcher theme_watcher
+  watcher="$(locate_sibling motion-wallpaper-watcher)"
+  theme_watcher="$(locate_sibling motion-wallpaper-theme-watcher)"
+
   kill_watcher
-  setsid "$watcher" < /dev/null >> "$LOG_FILE" 2>&1 &
-  disown 2>/dev/null || true
-  log "watcher spawned via $watcher"
+
+  if [ -n "$watcher" ]; then
+    setsid "$watcher" < /dev/null >> "$LOG_FILE" 2>&1 &
+    disown 2>/dev/null || true
+    log "auto-pause watcher spawned via $watcher"
+  else
+    log "auto-pause watcher binary not found — auto-pause disabled"
+  fi
+
+  if [ -n "$theme_watcher" ]; then
+    setsid "$theme_watcher" < /dev/null >> "$LOG_FILE" 2>&1 &
+    disown 2>/dev/null || true
+    log "theme watcher spawned via $theme_watcher"
+  else
+    log "theme watcher binary not found — theme-change auto-stop disabled"
+  fi
 }
 
 restore_static_wallpaper() {

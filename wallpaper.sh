@@ -5,6 +5,7 @@
 # Installs:
 #   ~/.local/bin/motion-wallpaper-toggle              runtime TUI
 #   ~/.local/bin/motion-wallpaper-watcher             auto-pause watcher
+#   ~/.local/bin/motion-wallpaper-theme-watcher       theme-change watcher
 #   ~/.local/share/applications/motion-wallpaper-toggle.desktop   app entry
 #   ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg   icon
 #   ~/.config/systemd/user/motion-wallpaper.service   optional autostart unit
@@ -29,10 +30,11 @@ fi
 
 TOGGLE_SRC="$SCRIPT_DIR/motion-wallpaper-toggle"
 WATCHER_SRC="$SCRIPT_DIR/motion-wallpaper-watcher"
+THEME_WATCHER_SRC="$SCRIPT_DIR/motion-wallpaper-theme-watcher"
 UNIT_SRC="$SCRIPT_DIR/motion-wallpaper.service"
 ICON_SRC="$SCRIPT_DIR/icons/motion-wallpaper.svg"
 
-for f in "$TOGGLE_SRC" "$WATCHER_SRC" "$UNIT_SRC" "$ICON_SRC"; do
+for f in "$TOGGLE_SRC" "$WATCHER_SRC" "$THEME_WATCHER_SRC" "$UNIT_SRC" "$ICON_SRC"; do
   if [ ! -f "$f" ]; then
     echo "Missing installer asset: $f" >&2
     exit 1
@@ -99,8 +101,9 @@ fi
 
 # ----- install files -----------------------------------------------------------
 
-install -D -m 755 "$TOGGLE_SRC"  "$HOME/.local/bin/motion-wallpaper-toggle"
-install -D -m 755 "$WATCHER_SRC" "$HOME/.local/bin/motion-wallpaper-watcher"
+install -D -m 755 "$TOGGLE_SRC"        "$HOME/.local/bin/motion-wallpaper-toggle"
+install -D -m 755 "$WATCHER_SRC"       "$HOME/.local/bin/motion-wallpaper-watcher"
+install -D -m 755 "$THEME_WATCHER_SRC" "$HOME/.local/bin/motion-wallpaper-theme-watcher"
 
 # Install custom SVG icon into the hicolor theme — Walker and other XDG-aware
 # launchers will find it by name (Icon=motion-wallpaper) without needing a

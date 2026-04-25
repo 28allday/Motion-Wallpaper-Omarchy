@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Motion Wallpaper — theme-change watcher.
+#
+# Polls the Omarchy background symlink (~/.config/omarchy/current/background).
+# When the user switches themes (or cycles backgrounds), Omarchy points the
+# symlink at a new image. mpvpaper would otherwise keep running on top of the
+# new theme's static wallpaper, so we tear it down via the toggle script —
+# which also respawns swaybg with the *new* symlink target.
+#
+# Runs as a sibling to mpvpaper. Spawned and killed by motion-wallpaper-toggle.
+# ==============================================================================
+
+set -euo pipefail
+
+BG_LINK="$HOME/.config/omarchy/current/background"
+LOG_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/motion-wallpaper.log"
+POLL_SECONDS=2
+
+log() {
+  printf '[%s] theme-watcher: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
+}
+
+# Non-Omarchy systems won't have the symlink. Exit silently — auto-pause still
+# works without us; we only matter on Omarchy where theme-set rotates the bg.
+if [ ! -L "$BG_LINK" ] && [ ! -e "$BG_LINK" ]; then
+  log "no Omarchy background symlink at $BG_LINK — exiting"
+  exit 0
+fi
+
+initial="$(readlink -f "$BG_LINK" 2>/dev/null || true)"
+if [ -z "$initial" ]; then
+  log "could not resolve $BG_LINK — exiting"
+  exit 0
+fi
+log "watching $BG_LINK (initial=$initial)"
+
+# Locate the toggle binary in PATH first, then fall back to our own dir — same
+# trick the auto-pause watcher uses, since launcher-spawned PATH is minimal.
+TOGGLE="$(command -v motion-wallpaper-toggle 2>/dev/null || true)"
+if [ -z "$TOGGLE" ]; then
+  self_dir="$(dirname "$(readlink -f "$0")")"
+  if [ -x "$self_dir/motion-wallpaper-toggle" ]; then
+    TOGGLE="$self_dir/motion-wallpaper-toggle"
+  fi
+fi
+if [ -z "$TOGGLE" ]; then
+  log "motion-wallpaper-toggle not found — exiting"
+  exit 0
+fi
+
+while sleep "$POLL_SECONDS"; do
+  current="$(readlink -f "$BG_LINK" 2>/dev/null || true)"
+  [ -z "$current" ] && continue
+  if [ "$current" != "$initial" ]; then
+    log "background changed ($initial → $current) — stopping motion wallpaper"
+    "$TOGGLE" stop >/dev/null 2>&1 || true
+    exit 0
+  fi
+done
