@@ -13,7 +13,7 @@ No `mpvpaper`, `swaybg`, `socat` watcher, systemd unit, or terminal TUI — the 
 ## Quick Start
 
 ```bash
-git clone https://git.no-signal.uk/nosignal/Motion-Wallpaper-Omarchy.git
+git clone https://github.com/28allday/Motion-Wallpaper-Omarchy.git
 cd Motion-Wallpaper-Omarchy
 chmod +x wallpaper.sh
 ./wallpaper.sh
