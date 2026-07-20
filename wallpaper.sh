@@ -1,185 +1,172 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Motion Wallpaper Installer for Omarchy / Hyprland
+# Motion Wallpaper installer for Omarchy 4 (Quickshell / omarchy-shell).
+#
+# Installs a native omarchy-shell service plugin that renders a looping, muted
+# video on the Wayland background layer, plus a gum TUI/CLI to control it.
 #
 # Installs:
-#   ~/.local/bin/motion-wallpaper-toggle              runtime TUI
-#   ~/.local/bin/motion-wallpaper-watcher             auto-pause watcher
-#   ~/.local/bin/motion-wallpaper-theme-watcher       theme-change watcher
-#   ~/.local/share/applications/motion-wallpaper-toggle.desktop   app entry
-#   ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg   icon
-#   ~/.config/systemd/user/motion-wallpaper.service   optional autostart unit
+#   ~/.config/omarchy/plugins/nosignal.motion-wallpaper/   the QML service plugin
+#   ~/.local/bin/motion-wallpaper                          TUI + CLI control
+#   ~/.local/share/applications/motion-wallpaper.desktop   app-menu entry
+#   ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg
+#   (enables the plugin id in ~/.config/omarchy/shell.json)
 #
-# Dependencies:
-#   mpv, jq, gum, socat, libnotify (pacman)
-#   mpvpaper (AUR, via yay or paru)
+# Dependencies: qt6-multimedia (video decode), gum, jq, python3, hyprland.
+# There is NO mpvpaper, swaybg, socat or systemd unit any more — the shell
+# plugin does the rendering, fullscreen auto-pause, and state persistence.
 # ==============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ID="nosignal.motion-wallpaper"
+QS_SHELL="/usr/share/omarchy/shell"
+PLUGIN_SRC="$SCRIPT_DIR/plugin/$PLUGIN_ID"
+CLI_SRC="$SCRIPT_DIR/motion-wallpaper"
+ICON_SRC="$SCRIPT_DIR/icons/motion-wallpaper.svg"
+SHELL_JSON="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+PLUGINS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins"
 
-echo "=== Motion wallpaper installer for Omarchy / Hyprland ==="
+echo "=== Motion Wallpaper installer (Omarchy 4 / Quickshell) ==="
 
 if ! command -v pacman >/dev/null 2>&1; then
-  echo "This script expects a pacman-based system (Arch/Omarchy). Aborting." >&2
+  echo "This installer expects a pacman-based system (Arch/Omarchy)." >&2
   exit 1
 fi
 
-# ----- source files ------------------------------------------------------------
+# ----- sanity: this needs the Quickshell-based omarchy-shell -------------------
+if [ ! -d "$QS_SHELL" ] || ! command -v qs >/dev/null 2>&1; then
+  cat >&2 <<MSG
+ERROR: omarchy-shell (Quickshell) not found at $QS_SHELL.
+This plugin targets Omarchy 4+. On older Omarchy (Waybar/swaybg) use the
+legacy mpvpaper-based release instead.
+MSG
+  exit 1
+fi
 
-TOGGLE_SRC="$SCRIPT_DIR/motion-wallpaper-toggle"
-WATCHER_SRC="$SCRIPT_DIR/motion-wallpaper-watcher"
-THEME_WATCHER_SRC="$SCRIPT_DIR/motion-wallpaper-theme-watcher"
-UNIT_SRC="$SCRIPT_DIR/motion-wallpaper.service"
-ICON_SRC="$SCRIPT_DIR/icons/motion-wallpaper.svg"
-
-for f in "$TOGGLE_SRC" "$WATCHER_SRC" "$THEME_WATCHER_SRC" "$UNIT_SRC" "$ICON_SRC"; do
-  if [ ! -f "$f" ]; then
-    echo "Missing installer asset: $f" >&2
-    exit 1
-  fi
+# ----- required assets --------------------------------------------------------
+for f in "$PLUGIN_SRC/manifest.json" "$PLUGIN_SRC/Service.qml" "$CLI_SRC" "$ICON_SRC"; do
+  [ -f "$f" ] || { echo "Missing installer asset: $f" >&2; exit 1; }
 done
 
-# ----- dependencies ------------------------------------------------------------
-
-# Check what's already there so we don't invoke sudo when nothing needs doing.
-MISSING_REPO=()
-for cmd in mpv jq gum socat notify-send; do
-  command -v "$cmd" >/dev/null 2>&1 || MISSING_REPO+=("$cmd")
-done
-# notify-send maps to libnotify; translate for the pacman call below.
+# ----- dependencies -----------------------------------------------------------
+# Package names differ from command names, so probe both.
 MISSING_PKGS=()
-for cmd in "${MISSING_REPO[@]}"; do
-  case "$cmd" in
-    notify-send) MISSING_PKGS+=("libnotify") ;;
-    *)           MISSING_PKGS+=("$cmd")      ;;
-  esac
-done
+command -v gum      >/dev/null 2>&1 || MISSING_PKGS+=("gum")
+command -v jq       >/dev/null 2>&1 || MISSING_PKGS+=("jq")
+command -v python3  >/dev/null 2>&1 || MISSING_PKGS+=("python")
+command -v hyprctl  >/dev/null 2>&1 || MISSING_PKGS+=("hyprland")
+# qt6-multimedia provides the QML MediaPlayer/VideoOutput used by the plugin.
+pacman -Qq qt6-multimedia >/dev/null 2>&1 || MISSING_PKGS+=("qt6-multimedia")
 
 if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
   echo "Installing required packages: ${MISSING_PKGS[*]}"
   sudo pacman -S --needed "${MISSING_PKGS[@]}"
 else
-  echo "✓ Repo dependencies already installed (mpv, jq, gum, socat, libnotify)"
+  echo "✓ Dependencies present (qt6-multimedia, gum, jq, python3, hyprland)"
 fi
 
-if command -v mpvpaper >/dev/null 2>&1; then
-  echo "✓ mpvpaper already installed"
-else
-  echo
-  echo "Installing mpvpaper from AUR..."
+# ----- install the plugin -----------------------------------------------------
+mkdir -p "$PLUGINS_DIR"
+DEST="$PLUGINS_DIR/$PLUGIN_ID"
+# If a previous install left a symlink (dev setup), replace it with a real copy.
+[ -L "$DEST" ] && rm -f "$DEST"
+rm -rf "$DEST"
+mkdir -p "$DEST"
+install -D -m 644 "$PLUGIN_SRC/manifest.json" "$DEST/manifest.json"
+install -D -m 644 "$PLUGIN_SRC/Service.qml"   "$DEST/Service.qml"
+echo "✓ Plugin installed to $DEST"
 
-  AUR_HELPER=""
-  if command -v yay  >/dev/null 2>&1; then AUR_HELPER="yay"
-  elif command -v paru >/dev/null 2>&1; then AUR_HELPER="paru"
-  fi
-
-  if [ -n "$AUR_HELPER" ]; then
-    echo "Using $AUR_HELPER to install mpvpaper..."
-    "$AUR_HELPER" -S --needed mpvpaper
+# ----- enable it in shell.json ------------------------------------------------
+# Add the plugin id to .plugins[] if absent, seeded disabled with no video so
+# the first launch shows the normal static wallpaper until the user picks a clip.
+if [ -f "$SHELL_JSON" ]; then
+  BACKUP="$SHELL_JSON.bak.$(date +%s)"
+  cp -f "$SHELL_JSON" "$BACKUP"
+  TMP="$(mktemp "${SHELL_JSON}.XXXXXX")"
+  if jq --arg id "$PLUGIN_ID" '
+      .plugins = (.plugins // []) |
+      if any(.plugins[]; .id == $id) then .
+      else .plugins += [{ "id": $id, "output": "all", "pauseOnFullscreen": true, "enabled": false }]
+      end' "$SHELL_JSON" > "$TMP"; then
+    mv -f "$TMP" "$SHELL_JSON"
+    echo "✓ Plugin enabled in shell.json (backup: $BACKUP)"
   else
-    cat >&2 <<'MSG'
-
-ERROR: No AUR helper (yay/paru) found.
-
-Install one first, then re-run this installer:
-
-  sudo pacman -S --needed base-devel git
-  git clone https://aur.archlinux.org/yay.git
-  cd yay && makepkg -si
-
-MSG
-    exit 1
+    rm -f "$TMP"
+    echo "⚠️  Could not edit $SHELL_JSON automatically. Add this to its \"plugins\" array:" >&2
+    echo '     { "id": "nosignal.motion-wallpaper", "output": "all", "pauseOnFullscreen": true, "enabled": false }' >&2
   fi
-
-  if ! command -v mpvpaper >/dev/null 2>&1; then
-    echo "ERROR: mpvpaper is not installed. Cannot continue." >&2
-    exit 1
-  fi
+else
+  echo "⚠️  $SHELL_JSON not found — is omarchy-shell configured? Skipping auto-enable." >&2
 fi
 
-# ----- install files -----------------------------------------------------------
+# ----- install the CLI --------------------------------------------------------
+install -D -m 755 "$CLI_SRC" "$HOME/.local/bin/motion-wallpaper"
+echo "✓ CLI installed to ~/.local/bin/motion-wallpaper"
 
-install -D -m 755 "$TOGGLE_SRC"        "$HOME/.local/bin/motion-wallpaper-toggle"
-install -D -m 755 "$WATCHER_SRC"       "$HOME/.local/bin/motion-wallpaper-watcher"
-install -D -m 755 "$THEME_WATCHER_SRC" "$HOME/.local/bin/motion-wallpaper-theme-watcher"
-
-# Install custom SVG icon into the hicolor theme — Walker and other XDG-aware
-# launchers will find it by name (Icon=motion-wallpaper) without needing a
-# full path in the .desktop entry.
+# ----- icon + desktop entry ---------------------------------------------------
 ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
 install -D -m 644 "$ICON_SRC" "$ICON_DIR/motion-wallpaper.svg"
-
-# Refresh the icon cache if gtk-update-icon-cache is available. Harmless if
-# not — launchers that read SVGs directly will pick it up regardless.
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+command -v gtk-update-icon-cache >/dev/null 2>&1 && \
   gtk-update-icon-cache -f -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
-fi
 
 mkdir -p "$HOME/.local/share/applications"
-# Launch in a floating terminal via Omarchy's TUI.float app-id, which the
-# default Hyprland windowrule (system.conf) tags as a floating window — same
-# pattern omarchy-tui-install uses for user-added TUIs (impala, btop, etc.).
-cat > "$HOME/.local/share/applications/motion-wallpaper-toggle.desktop" <<EOF
+# Launch in a floating terminal via Omarchy's TUI.float app-id (the default
+# Hyprland windowrule tags it floating), same pattern omarchy-tui-install uses.
+cat > "$HOME/.local/share/applications/motion-wallpaper.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=Motion Wallpaper
-Comment=Toggle animated video wallpaper on/off (TUI)
-Exec=xdg-terminal-exec --app-id=TUI.float -e $HOME/.local/bin/motion-wallpaper-toggle
+Comment=Play an animated video wallpaper (TUI)
+Exec=xdg-terminal-exec --app-id=TUI.float -e $HOME/.local/bin/motion-wallpaper
 Icon=motion-wallpaper
 Terminal=false
 Categories=Utility;Settings;DesktopSettings;
-Keywords=wallpaper;video;animated;background;
+Keywords=wallpaper;video;animated;background;motion;
 EOF
-
-# Poke the desktop database so launchers re-index immediately.
-if command -v update-desktop-database >/dev/null 2>&1; then
+command -v update-desktop-database >/dev/null 2>&1 && \
   update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
-fi
 
-install -D -m 644 "$UNIT_SRC" "$HOME/.config/systemd/user/motion-wallpaper.service"
-systemctl --user daemon-reload >/dev/null 2>&1 || true
-
-# Walker's data provider (Elephant) caches the desktop index in memory. Nudge
-# it so the new entry + icon show up without the user having to log out.
+# Nudge Walker's data provider so the entry + icon show without a re-login.
 if systemctl --user --quiet is-active elephant.service 2>/dev/null; then
   systemctl --user restart elephant.service || true
 fi
 
-# ----- done --------------------------------------------------------------------
-
+# ----- load the plugin now ----------------------------------------------------
 echo
-echo "=== Install complete ==="
-echo
-echo "✓ motion-wallpaper-toggle installed to ~/.local/bin/"
-echo "✓ 'Motion Wallpaper' added to your application menu"
-echo "✓ systemd unit installed (not enabled)"
-echo
-
-if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-  cat <<'MSG'
-⚠️  ~/.local/bin is not in your PATH. Add to your shell rc:
-
-    export PATH="$HOME/.local/bin:$PATH"
-
-MSG
+if command -v omarchy-restart-shell >/dev/null 2>&1; then
+  echo "Restarting omarchy-shell to load the plugin…"
+  omarchy-restart-shell >/dev/null 2>&1 || true
+  echo "✓ Shell restarted"
+else
+  echo "⚠️  Restart omarchy-shell manually to load the plugin (omarchy-restart-shell)."
 fi
 
+# ----- done -------------------------------------------------------------------
 cat <<EOF
-Usage:
-  motion-wallpaper-toggle           # interactive (toggle / change video)
-  motion-wallpaper-toggle status    # print current state
-  motion-wallpaper-toggle stop      # stop and restore normal wallpaper
 
-Tip: drop videos in ~/Videos/Wallpapers/ for quick-pick access.
+=== Install complete ===
 
-Optional Hyprland keybind (avoid SUPER+W — that's Close window in Omarchy):
-  bind = SUPER ALT, W, exec, \$HOME/.local/bin/motion-wallpaper-toggle
+✓ 'Motion Wallpaper' added to your application menu
+✓ CLI: motion-wallpaper  (run with no args for the TUI)
 
-Persist across logins via systemd:
-  systemctl --user enable --now motion-wallpaper.service
+Quick start:
+  motion-wallpaper            # interactive: pick a video and play
+  motion-wallpaper status
+  motion-wallpaper stop
 
+Tip: drop clips in ~/Videos/Wallpapers/ for one-key quick-pick.
+
+Optional Hyprland keybind (SUPER+W is Close window in Omarchy — avoid it):
+  bindd = SUPER ALT, W, Motion wallpaper, exec, motion-wallpaper toggle
+
+A playing wallpaper resumes automatically after reboot — no autostart step.
 Logs: ~/.cache/motion-wallpaper.log
 EOF
+
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+  echo
+  echo "⚠️  ~/.local/bin is not in your PATH. Add: export PATH=\"\$HOME/.local/bin:\$PATH\""
+fi

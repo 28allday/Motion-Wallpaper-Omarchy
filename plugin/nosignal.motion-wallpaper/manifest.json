@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "nosignal.motion-wallpaper",
+  "name": "Motion Wallpaper",
+  "version": "0.1.0",
+  "author": "Gavin Nugent",
+  "license": "MIT",
+  "description": "Native looping video wallpaper for omarchy-shell. Renders a muted, looping video on the background layer above the static wallpaper, per-monitor targeting, with native auto-pause on fullscreen. Replaces the old mpvpaper tool. Control via: qs -p /usr/share/omarchy/shell ipc call motion-wallpaper <fn>",
+  "kinds": ["service"],
+  "entryPoints": {
+    "service": "Service.qml"
+  },
+  "service": {
+    "displayName": "Motion Wallpaper",
+    "description": "Looping video wallpaper on the background layer.",
+    "category": "Appearance",
+    "defaults": {
+      "videoPath": "",
+      "output": "all",
+      "pauseOnFullscreen": true,
+      "enabled": true
+    },
+    "schema": [
+      { "key": "videoPath", "type": "path", "label": "Video file", "defaultValue": "" },
+      { "key": "output", "type": "string", "label": "Output (monitor connector name, or 'all')", "defaultValue": "all" },
+      { "key": "pauseOnFullscreen", "type": "boolean", "label": "Pause on fullscreen window", "defaultValue": true },
+      { "key": "enabled", "type": "boolean", "label": "Enabled", "defaultValue": true }
+    ]
+  }
+}

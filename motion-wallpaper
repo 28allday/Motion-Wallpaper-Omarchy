@@ -1,0 +1,495 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Motion Wallpaper — gum-powered TUI + CLI for the omarchy-shell video-wallpaper
+# plugin (nosignal.motion-wallpaper) on Omarchy 4 (Quickshell).
+#
+# This is the USER-FACING control surface. All runtime work is done by the QML
+# service plugin; this script just drives it over the shell's IPC:
+#   qs -p /usr/share/omarchy/shell ipc call motion-wallpaper <fn> [args]
+#
+# There is no mpvpaper, swaybg, socat watcher or systemd unit any more — the
+# plugin renders the video itself on the Wayland background layer, pauses on
+# fullscreen natively, and persists its state, so a playing wallpaper resumes
+# automatically after a reboot (no separate "autostart" needed).
+#
+# Actions:
+#   toggle  (default)  Interactive TUI. Adapts to playing / paused / stopped.
+#   start              Start from saved video (non-interactive).
+#   stop               Stop the video; the static wallpaper shows through.
+#   change             Pick a new video (interactive).
+#   play <file>        Set + start a specific video (non-interactive).
+#   pause | resume     Pause/resume without tearing the surface down.
+#   status             Print current state.
+#
+# Files:
+#   ~/Videos/Wallpapers/                         optional quick-pick library
+#   ~/.local/state/motion-wallpaper/state.json   plugin runtime state (owned by
+#                                                the plugin, shown here read-only)
+#   ~/.config/omarchy/shell.json                 plugin config (output monitor)
+#   ~/.cache/motion-wallpaper.log                this script's log
+# ==============================================================================
+
+set -euo pipefail
+
+APP_NAME="Motion Wallpaper"
+QS_SHELL="/usr/share/omarchy/shell"
+PLUGIN_ID="nosignal.motion-wallpaper"
+SHELL_JSON="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+LIBRARY_DIR="$HOME/Videos/Wallpapers"
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
+LOG_FILE="$LOG_DIR/motion-wallpaper.log"
+RESTART_SHELL_CMD="omarchy-restart-shell"
+
+mkdir -p "$LOG_DIR"
+
+# ===== theme colors ===========================================================
+# Follow the active Omarchy theme. On Omarchy 4 the current-theme symlink lives
+# under ~/.local/state (it was ~/.config on Omarchy <=3); try both. Defaults are
+# Catppuccin Mocha and only apply if colors.toml is missing/unreadable.
+THEME_COLORS_FILE=""
+for _c in \
+  "$HOME/.local/state/omarchy/current/theme/colors.toml" \
+  "$HOME/.config/omarchy/current/theme/colors.toml"; do
+  [ -r "$_c" ] && { THEME_COLORS_FILE="$_c"; break; }
+done
+
+load_theme_colors() {
+  COLOR_ACCENT="#cba6f7"
+  COLOR_ERROR="#f38ba8"
+  COLOR_OK="#a6e3a1"
+  COLOR_MUTED="#6c7086"
+  COLOR_WARN="#f9e2af"
+  [ -n "$THEME_COLORS_FILE" ] && [ -r "$THEME_COLORS_FILE" ] || return 0
+  local key val
+  while IFS='=' read -r key val; do
+    key="${key// /}"
+    val="${val// /}"; val="${val//\"/}"
+    case "$key" in
+      accent) COLOR_ACCENT="$val" ;;
+      color1) COLOR_ERROR="$val"  ;;
+      color2) COLOR_OK="$val"     ;;
+      color3) COLOR_WARN="$val"   ;;
+      color8) COLOR_MUTED="$val"  ;;
+    esac
+  done < "$THEME_COLORS_FILE"
+}
+load_theme_colors
+
+# ===== layout + gum theming ===================================================
+PANEL_WIDTH=54
+
+export GUM_CHOOSE_CURSOR_FOREGROUND="$COLOR_ACCENT"
+export GUM_CHOOSE_SELECTED_FOREGROUND="$COLOR_ACCENT"
+export GUM_CHOOSE_HEADER_FOREGROUND="$COLOR_ACCENT"
+export GUM_CONFIRM_PROMPT_FOREGROUND="$COLOR_ACCENT"
+export GUM_CONFIRM_SELECTED_BACKGROUND="$COLOR_ACCENT"
+export GUM_CONFIRM_SELECTED_FOREGROUND="$COLOR_MUTED"
+export GUM_INPUT_PROMPT_FOREGROUND="$COLOR_ACCENT"
+export GUM_INPUT_CURSOR_FOREGROUND="$COLOR_ACCENT"
+export GUM_FILTER_INDICATOR_FOREGROUND="$COLOR_ACCENT"
+export GUM_SPIN_SPINNER_FOREGROUND="$COLOR_ACCENT"
+export GUM_CHOOSE_SHOW_HELP=false
+export GUM_FILTER_SHOW_HELP=false
+export GUM_FILE_SHOW_HELP=false
+
+panel_margin() {
+  local cols
+  cols="$(tput cols 2>/dev/null || echo "${COLUMNS:-80}")"
+  local m=$(( (cols - PANEL_WIDTH) / 2 ))
+  [ "$m" -lt 0 ] && m=0
+  printf '%s' "$m"
+}
+
+panel_indent() {
+  printf '%*s' "$(panel_margin)" ''
+}
+
+# ===== user-facing strings ====================================================
+TXT_TITLE="◐ $APP_NAME"
+TXT_LBL_STATUS="   status:"
+TXT_LBL_VIDEO="    video:"
+TXT_LBL_OUTPUT="   output:"
+TXT_LBL_FSPAUSE="fs-pause:"
+
+TXT_VAL_PLAYING="playing"
+TXT_VAL_PAUSED="paused"
+TXT_VAL_STOPPED="stopped"
+TXT_VAL_NOVIDEO="no video set"
+TXT_VAL_MISSING="file missing"
+TXT_VAL_NONE="(none)"
+TXT_VAL_ALL="all monitors"
+
+TXT_HDR_MAIN="What would you like to do?"
+TXT_HDR_MONITOR="Play the video on which output?"
+TXT_HDR_LIBRARY_FMT="Choose a video from %s"
+TXT_HDR_BROWSE_FMT="Browse: %s"
+
+TXT_BTN_STOP="Stop motion wallpaper"
+TXT_BTN_CHANGE="Change video"
+TXT_BTN_PAUSE="Pause"
+TXT_BTN_RESUME="Resume"
+TXT_BTN_PICK="Pick a video and start"
+TXT_BTN_START_FMT="Start with %s"
+TXT_BTN_OUTPUT="Change output monitor"
+TXT_BTN_CANCEL="Cancel"
+TXT_BTN_ALL_MONITORS="All monitors"
+TXT_BTN_UP="── Up one folder ──"
+TXT_BTN_BROWSE="── Browse filesystem… ──"
+
+TXT_OK_STOPPED="Stopped. Static wallpaper restored."
+TXT_OK_PAUSED="Paused."
+TXT_OK_RESUMED="Resumed."
+TXT_OK_SWAPPED_FMT="Now playing %s."
+TXT_OK_STARTED_FMT="Started %s."
+TXT_OK_OUTPUT_FMT="Output set to %s — restarting shell…"
+
+TXT_ERR_NO_SHELL="omarchy-shell (Quickshell) isn't running. Start your Omarchy session first."
+TXT_ERR_NO_PLUGIN="The motion-wallpaper plugin isn't loaded. Run the installer (wallpaper.sh) and restart the shell."
+TXT_ERR_FILE_FMT="File not found: %s"
+TXT_ERR_EMPTY_DIR="No subfolders or videos in this folder."
+TXT_ERR_NO_HYPRCTL="hyprctl not found. Are you in Hyprland?"
+
+TXT_PRESS_ENTER="Press enter to close…"
+
+# ===== helpers ================================================================
+log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"; }
+
+require_cmd() {
+  local c
+  for c in "$@"; do
+    command -v "$c" >/dev/null 2>&1 || { echo "ERROR: '$c' is not installed." >&2; exit 1; }
+  done
+}
+
+require_tty() {
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "This action is interactive; run it in a terminal." >&2
+    exit 1
+  fi
+}
+
+restore_terminal() { [ -t 1 ] && { tput cnorm 2>/dev/null || true; }; }
+trap restore_terminal EXIT
+
+tui_err() {
+  gum style --foreground="$COLOR_ERROR" --bold "ERROR: $1" >&2
+  if [ -t 0 ]; then gum input --placeholder="$TXT_PRESS_ENTER" >/dev/null 2>&1 || true; fi
+}
+tui_ok()   { gum style --foreground="$COLOR_OK" "✓ $1" >&2; }
+tui_info() { gum style --foreground="$COLOR_MUTED" "$1" >&2; }
+
+# ----- IPC --------------------------------------------------------------------
+shell_running() { pgrep -f "quickshell.*$QS_SHELL" >/dev/null 2>&1; }
+
+plugin_loaded() {
+  qs -p "$QS_SHELL" ipc show 2>/dev/null | grep -qx "target motion-wallpaper"
+}
+
+# Guard used by every action: bail early with a clear message if the shell or
+# the plugin isn't there, rather than letting `qs` fail cryptically.
+require_plugin() {
+  if ! shell_running; then
+    if [ -t 1 ] && command -v gum >/dev/null 2>&1; then tui_err "$TXT_ERR_NO_SHELL"; else echo "$TXT_ERR_NO_SHELL" >&2; fi
+    exit 1
+  fi
+  if ! plugin_loaded; then
+    if [ -t 1 ] && command -v gum >/dev/null 2>&1; then tui_err "$TXT_ERR_NO_PLUGIN"; else echo "$TXT_ERR_NO_PLUGIN" >&2; fi
+    exit 1
+  fi
+}
+
+ipc() { qs -p "$QS_SHELL" ipc call motion-wallpaper "$@" 2>>"$LOG_FILE"; }
+
+# Cache the status JSON for a single render pass.
+STATUS_JSON=""
+load_status() { STATUS_JSON="$(ipc status 2>/dev/null || echo '{}')"; }
+st() { printf '%s' "$STATUS_JSON" | jq -r "$1 // empty" 2>/dev/null; }
+
+# Derive a single human state word from the status JSON.
+state_word() {
+  local enabled paused exists video
+  enabled="$(st '.enabled')"; paused="$(st '.manualPaused')"
+  exists="$(st '.videoFileExists')"; video="$(st '.videoPath')"
+  if [ "$enabled" != "true" ]; then echo stopped; return; fi
+  if [ -z "$video" ]; then echo novideo; return; fi
+  if [ "$exists" != "true" ]; then echo missing; return; fi
+  if [ "$paused" = "true" ]; then echo paused; return; fi
+  echo playing
+}
+
+# ===== status panel ===========================================================
+header_text() {
+  local state video output fspause status_val video_val output_val fspause_val
+  state="$(state_word)"
+  video="$(st '.videoPath')"
+  output="$(st '.output')"
+  fspause="$(st '.pauseOnFullscreen')"
+
+  case "$state" in
+    playing) status_val="$(gum style --foreground="$COLOR_OK"    "$TXT_VAL_PLAYING")" ;;
+    paused)  status_val="$(gum style --foreground="$COLOR_WARN"  "$TXT_VAL_PAUSED")"  ;;
+    novideo) status_val="$(gum style --foreground="$COLOR_MUTED" "$TXT_VAL_NOVIDEO")" ;;
+    missing) status_val="$(gum style --foreground="$COLOR_ERROR" "$TXT_VAL_MISSING")" ;;
+    *)       status_val="$(gum style --foreground="$COLOR_MUTED" "$TXT_VAL_STOPPED")" ;;
+  esac
+
+  if [ -n "$video" ]; then video_val="$(basename "$video")"
+  else video_val="$(gum style --foreground="$COLOR_MUTED" --italic "$TXT_VAL_NONE")"; fi
+
+  if [ -z "$output" ] || [ "$output" = "all" ]; then output_val="$TXT_VAL_ALL"; else output_val="$output"; fi
+
+  if [ "$fspause" = "true" ]; then fspause_val="$(gum style --foreground="$COLOR_OK" "on")"
+  else fspause_val="$(gum style --foreground="$COLOR_MUTED" "off")"; fi
+
+  gum style --border=rounded --border-foreground="$COLOR_ACCENT" \
+            --padding="0 1" --width="$PANEL_WIDTH" --margin="0 $(panel_margin)" \
+            "$(gum style --bold --foreground="$COLOR_ACCENT" "$TXT_TITLE")" \
+            "" \
+            "$TXT_LBL_STATUS $status_val" \
+            "$TXT_LBL_VIDEO $video_val" \
+            "$TXT_LBL_OUTPUT $output_val" \
+            "  $TXT_LBL_FSPAUSE $fspause_val"
+}
+
+# Clear screen, draw the panel to stderr (so command-substituted pickers don't
+# capture it), and align the gum-choose cursor under the centered panel.
+show_panel() {
+  tput clear >&2 2>/dev/null || printf '\033[2J\033[H' >&2
+  header_text >&2
+  echo >&2
+  export GUM_CHOOSE_CURSOR="$(panel_indent)> "
+}
+
+# ===== selection ==============================================================
+get_monitors() {
+  hyprctl -j monitors 2>/dev/null | jq -r '.[].name' 2>/dev/null
+}
+
+pick_target() {
+  command -v hyprctl >/dev/null || { tui_err "$TXT_ERR_NO_HYPRCTL"; return 1; }
+  local monitors count selected
+  monitors="$(get_monitors)"
+  count="$(printf '%s\n' "$monitors" | grep -c . || true)"
+  if [ "${count:-0}" -le 1 ]; then printf 'all'; return 0; fi
+  show_panel
+  selected=$( { echo "$TXT_BTN_ALL_MONITORS"; printf '%s\n' "$monitors"; } \
+    | gum choose --header="$(panel_indent)$TXT_HDR_MONITOR") || return 1
+  if [ "$selected" = "$TXT_BTN_ALL_MONITORS" ]; then printf 'all'; else printf '%s' "$selected"; fi
+}
+
+# Custom $HOME-confined browser (same approach as the old TUI): keeps the status
+# panel visible and can't escape above $HOME.
+browse_filesystem() {
+  local cur="${1:-$HOME}"
+  case "$cur" in "$HOME"|"$HOME"/*) : ;; *) cur="$HOME" ;; esac
+  [ -d "$cur" ] || cur="$HOME"
+  local entries name rel label choice
+  while true; do
+    entries=()
+    [ "$cur" != "$HOME" ] && entries+=("$TXT_BTN_UP")
+    while IFS= read -r -d '' name; do entries+=("$(basename "$name")/"); done \
+      < <(find "$cur" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 2>/dev/null | sort -z)
+    while IFS= read -r -d '' name; do entries+=("$(basename "$name")"); done \
+      < <(find "$cur" -mindepth 1 -maxdepth 1 -type f ! -name '.*' \
+            \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.mov' -o -iname '*.avi' \) \
+            -print0 2>/dev/null | sort -z)
+    if [ ${#entries[@]} -eq 0 ]; then
+      gum style --foreground="$COLOR_ERROR" "$TXT_ERR_EMPTY_DIR" >&2
+      [ "$cur" = "$HOME" ] && return 1
+      cur="$HOME"; continue
+    fi
+    rel="${cur#"$HOME"}"; [ -z "$rel" ] && rel="/"
+    label="$(printf "$TXT_HDR_BROWSE_FMT" "~$rel")"
+    show_panel
+    choice=$(printf '%s\n' "${entries[@]}" | gum choose --height=20 --header="$(panel_indent)$label") || return 1
+    case "$choice" in
+      "$TXT_BTN_UP") cur="$(dirname "$cur")" ;;
+      */)            cur="$cur/${choice%/}"  ;;
+      *)             printf '%s' "$cur/$choice"; return 0 ;;
+    esac
+  done
+}
+
+pick_video() {
+  local library=() basenames=() v f choice
+  if [ -d "$LIBRARY_DIR" ]; then
+    while IFS= read -r -d '' f; do library+=("$f"); done \
+      < <(find "$LIBRARY_DIR" -maxdepth 1 -type f \
+            \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.mov' -o -iname '*.avi' \) \
+            -print0 2>/dev/null | sort -z)
+  fi
+  if [ ${#library[@]} -eq 0 ]; then browse_filesystem; return $?; fi
+  for v in "${library[@]}"; do basenames+=("$(basename "$v")"); done
+  show_panel
+  choice=$( { printf '%s\n' "${basenames[@]}"; echo "$TXT_BTN_BROWSE"; } \
+    | gum choose --header="$(panel_indent)$(printf "$TXT_HDR_LIBRARY_FMT" "$LIBRARY_DIR")") || return 1
+  if [ "$choice" = "$TXT_BTN_BROWSE" ]; then browse_filesystem
+  else printf '%s' "$LIBRARY_DIR/$choice"; fi
+}
+
+# ===== plugin control =========================================================
+do_play()   { ipc play "$1" >/dev/null; }
+do_stop()   { ipc stop      >/dev/null; }
+do_pause()  { ipc pause     >/dev/null; }
+do_resume() { ipc resume    >/dev/null; }
+
+# Change the target output. `output` is config-only (shell.json), so we edit the
+# plugin entry with jq and restart the shell to apply it.
+set_output() {
+  local out="$1" tmp
+  require_cmd jq
+  [ -f "$SHELL_JSON" ] || { tui_err "shell.json not found at $SHELL_JSON"; return 1; }
+  tmp="$(mktemp "${SHELL_JSON}.XXXXXX")"
+  if jq --arg id "$PLUGIN_ID" --arg out "$out" \
+      '(.plugins[] | select(.id == $id) | .output) = $out' \
+      "$SHELL_JSON" > "$tmp" 2>>"$LOG_FILE"; then
+    mv -f "$tmp" "$SHELL_JSON"
+    log "set output=$out in $SHELL_JSON"
+    tui_ok "$(printf "$TXT_OK_OUTPUT_FMT" "$out")"
+    if command -v "$RESTART_SHELL_CMD" >/dev/null 2>&1; then
+      setsid "$RESTART_SHELL_CMD" >/dev/null 2>&1 &
+    fi
+  else
+    rm -f "$tmp"
+    tui_err "Failed to update shell.json (jq error). See $LOG_FILE."
+    return 1
+  fi
+}
+
+# ===== interactive TUI ========================================================
+action_toggle() {
+  require_cmd gum jq
+  require_tty
+  require_plugin
+
+  while true; do
+    load_status
+    local state; state="$(state_word)"
+    local options=() choice video target last_video last_label=""
+
+    case "$state" in
+      playing|paused)
+        options+=("$TXT_BTN_STOP" "$TXT_BTN_CHANGE")
+        if [ "$state" = "playing" ]; then options+=("$TXT_BTN_PAUSE"); else options+=("$TXT_BTN_RESUME"); fi
+        options+=("$TXT_BTN_OUTPUT" "$TXT_BTN_CANCEL")
+        ;;
+      *)
+        last_video="$(st '.videoPath')"
+        if [ -n "$last_video" ] && [ -f "$last_video" ]; then
+          last_label="$(printf "$TXT_BTN_START_FMT" "$(basename "$last_video")")"
+          options+=("$last_label")
+        fi
+        options+=("$TXT_BTN_PICK" "$TXT_BTN_OUTPUT" "$TXT_BTN_CANCEL")
+        ;;
+    esac
+
+    show_panel
+    choice=$(gum choose --header="$(panel_indent)$TXT_HDR_MAIN" "${options[@]}") || break
+
+    case "$choice" in
+      "$TXT_BTN_STOP")
+        do_stop; tui_ok "$TXT_OK_STOPPED"; continue ;;
+      "$TXT_BTN_PAUSE")
+        do_pause; tui_ok "$TXT_OK_PAUSED"; continue ;;
+      "$TXT_BTN_RESUME")
+        do_resume; tui_ok "$TXT_OK_RESUMED"; continue ;;
+      "$TXT_BTN_CHANGE")
+        video=$(pick_video) || continue
+        [ -z "$video" ] && continue
+        [ -f "$video" ] || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; continue; }
+        do_play "$video"; tui_ok "$(printf "$TXT_OK_SWAPPED_FMT" "$(basename "$video")")"; continue ;;
+      "$last_label")
+        [ -n "$last_label" ] || continue
+        do_play "$last_video"; tui_ok "$(printf "$TXT_OK_STARTED_FMT" "$(basename "$last_video")")"; continue ;;
+      "$TXT_BTN_PICK")
+        video=$(pick_video) || continue
+        [ -z "$video" ] && continue
+        [ -f "$video" ] || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; continue; }
+        do_play "$video"; tui_ok "$(printf "$TXT_OK_STARTED_FMT" "$(basename "$video")")"; continue ;;
+      "$TXT_BTN_OUTPUT")
+        target=$(pick_target) || continue
+        [ -z "$target" ] && continue
+        set_output "$target"
+        # Shell is restarting; the IPC target will be briefly unavailable.
+        break ;;
+      "$TXT_BTN_CANCEL"|*) break ;;
+    esac
+  done
+  exit 0
+}
+
+# ===== non-interactive actions ================================================
+action_start() {
+  require_plugin
+  load_status
+  local video; video="$(st '.videoPath')"
+  if [ -z "$video" ]; then echo "No saved video. Run 'motion-wallpaper' and pick one." >&2; exit 1; fi
+  do_play "$video"
+}
+
+action_play() {
+  require_plugin
+  local f="${1:-}"
+  [ -n "$f" ] || { echo "Usage: motion-wallpaper play <file>" >&2; exit 1; }
+  [ -f "$f" ] || { echo "File not found: $f" >&2; exit 1; }
+  do_play "$(readlink -f "$f")"
+}
+
+action_change() {
+  require_cmd gum jq
+  require_tty
+  require_plugin
+  local video
+  video=$(pick_video) || exit 0
+  [ -z "$video" ] && exit 0
+  [ -f "$video" ] || { tui_err "$(printf "$TXT_ERR_FILE_FMT" "$video")"; exit 1; }
+  do_play "$video"
+  tui_ok "$(printf "$TXT_OK_SWAPPED_FMT" "$(basename "$video")")"
+}
+
+action_status() {
+  require_plugin
+  if command -v gum >/dev/null 2>&1 && [ -t 1 ]; then
+    load_status; header_text
+  else
+    load_status
+    echo "status: $(state_word)"
+    local v o; v="$(st '.videoPath')"; o="$(st '.output')"
+    [ -n "$v" ] && echo "video:  $v"
+    [ -n "$o" ] && echo "output: $o"
+  fi
+}
+
+# ===== main ===================================================================
+case "${1:-toggle}" in
+  toggle|"") action_toggle ;;
+  start)     action_start ;;
+  stop)      require_plugin; do_stop ;;
+  pause)     require_plugin; do_pause ;;
+  resume)    require_plugin; do_resume ;;
+  change)    action_change ;;
+  play)      shift; action_play "${1:-}" ;;
+  status)    action_status ;;
+  -h|--help)
+    cat <<USAGE
+$APP_NAME — control the omarchy-shell video wallpaper plugin.
+Usage: ${0##*/} [toggle|start|stop|pause|resume|change|play <file>|status]
+
+  toggle   Interactive gum TUI (default).
+  start    Start from the saved video (non-interactive).
+  stop     Stop the video; static wallpaper shows through.
+  pause    Pause playback (surface stays up).
+  resume   Resume playback.
+  change   Pick a new video (interactive).
+  play F   Set and start video file F (non-interactive).
+  status   Print current state.
+
+A playing wallpaper persists across reboots automatically — no autostart step.
+USAGE
+    ;;
+  *)
+    echo "Unknown action: $1" >&2
+    echo "Try: ${0##*/} --help" >&2
+    exit 1
+    ;;
+esac
