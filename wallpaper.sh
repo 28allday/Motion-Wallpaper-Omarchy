@@ -46,7 +46,8 @@ MSG
 fi
 
 # ----- required assets --------------------------------------------------------
-for f in "$PLUGIN_SRC/manifest.json" "$PLUGIN_SRC/Service.qml" "$CLI_SRC" "$ICON_SRC"; do
+for f in "$PLUGIN_SRC/manifest.json" "$PLUGIN_SRC/Service.qml" \
+         "$PLUGIN_SRC/BarWidget.qml" "$PLUGIN_SRC/Panel.qml" "$CLI_SRC" "$ICON_SRC"; do
   [ -f "$f" ] || { echo "Missing installer asset: $f" >&2; exit 1; }
 done
 
@@ -74,9 +75,9 @@ DEST="$PLUGINS_DIR/$PLUGIN_ID"
 [ -L "$DEST" ] && rm -f "$DEST"
 rm -rf "$DEST"
 mkdir -p "$DEST"
-install -D -m 644 "$PLUGIN_SRC/manifest.json" "$DEST/manifest.json"
-install -D -m 644 "$PLUGIN_SRC/Service.qml"   "$DEST/Service.qml"
-echo "✓ Plugin installed to $DEST"
+# Copy every plugin file — manifest plus all QML (service, bar widget, panel).
+install -m 644 "$PLUGIN_SRC"/*.json "$PLUGIN_SRC"/*.qml "$DEST"/
+echo "✓ Plugin installed to $DEST ($(find "$DEST" -type f | wc -l) files)"
 
 # ----- enable it in shell.json ------------------------------------------------
 # Add the plugin to .plugins[] (seeded disabled, no video, so first launch shows
