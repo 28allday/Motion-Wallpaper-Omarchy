@@ -52,17 +52,20 @@ Item {
     return (v === undefined || v === null) ? fallback : v
   }
 
-  // Config-only options (always live from shell.json).
-  readonly property string output: String(cfg("output", "all") || "all")
-  readonly property bool pauseOnFullscreen: cfg("pauseOnFullscreen", true) === true
-                                            || String(cfg("pauseOnFullscreen", "true")) === "true"
-
   // ---------------------------------------------------------------- state
-  // Runtime truth for videoPath + enabled (seeded from config, mutated by IPC).
+  // Runtime truth for videoPath + enabled + output + pauseOnFullscreen.
+  // Seeded from the shell.json config entry on first run (and re-seeded when
+  // that entry is edited), but mutated by IPC / the bar panel thereafter —
+  // so the screen selector and auto-pause switch persist and take effect with
+  // NO shell restart (the activeScreens binding below re-evaluates live).
   property string videoPath: ""
   property bool enabled: true
+  property string output: "all"
+  property bool pauseOnFullscreen: true
   property bool manualPaused: false   // set by IPC pause(); cleared by resume()/play()
   property bool _stateLoaded: false
+  property bool _stateHadOutput: false  // state.json carried an explicit output
+  property bool _stateHadPause: false   // state.json carried an explicit pauseOnFullscreen
 
   // Track the config seed so a shell.json edit re-seeds the state file.
   property string _seedSig: ""
@@ -116,7 +119,12 @@ Item {
 
   // ------------------------------------------------------- persistence
   function persistState() {
-    var payload = JSON.stringify({ videoPath: root.videoPath, enabled: root.enabled }, null, 2) + "\n"
+    var payload = JSON.stringify({
+      videoPath: root.videoPath,
+      enabled: root.enabled,
+      output: root.output,
+      pauseOnFullscreen: root.pauseOnFullscreen
+    }, null, 2) + "\n"
     stateFile.setText(payload)
   }
 
@@ -128,6 +136,14 @@ Item {
       if (o && typeof o === "object") {
         if (o.videoPath !== undefined) root.videoPath = String(o.videoPath || "")
         if (o.enabled !== undefined) root.enabled = (o.enabled === true || String(o.enabled) === "true")
+        if (o.output !== undefined) {
+          root.output = String(o.output || "all") || "all"
+          root._stateHadOutput = true
+        }
+        if (o.pauseOnFullscreen !== undefined) {
+          root.pauseOnFullscreen = (o.pauseOnFullscreen === true || String(o.pauseOnFullscreen) === "true")
+          root._stateHadPause = true
+        }
         return true
       }
     } catch (e) {
@@ -137,24 +153,34 @@ Item {
   }
 
   // Seed from config on first run, and re-seed when the config seed changes.
+  // videoPath/enabled/output/pauseOnFullscreen all seed from shell.json the
+  // first time (unless state.json already carried them) and are re-seeded
+  // wholesale when the shell.json entry is edited; between those, runtime
+  // (IPC/panel) mutations win.
   function syncSeedFromConfig() {
     var vp = String(cfg("videoPath", "") || "")
     var en = cfg("enabled", true) === true || String(cfg("enabled", "true")) === "true"
-    var sig = JSON.stringify([vp, en])
+    var op = String(cfg("output", "all") || "all") || "all"
+    var pf = cfg("pauseOnFullscreen", true) === true || String(cfg("pauseOnFullscreen", "true")) === "true"
+    var sig = JSON.stringify([vp, en, op, pf])
     if (!root._stateLoaded) return           // wait until state file has loaded
     if (root._seedSig === "") {               // first sync after load
       root._seedSig = sig
-      if (!root.videoPath && vp) {            // no persisted state yet -> seed
+      if (!root.videoPath && vp) {            // no persisted video yet -> seed
         root.videoPath = vp
         root.enabled = en
-        persistState()
       }
+      if (!root._stateHadOutput) root.output = op            // no persisted output -> seed
+      if (!root._stateHadPause) root.pauseOnFullscreen = pf  // no persisted flag -> seed
+      persistState()
       return
     }
     if (sig !== root._seedSig) {              // config edited -> re-seed state
       root._seedSig = sig
       root.videoPath = vp
       root.enabled = en
+      root.output = op
+      root.pauseOnFullscreen = pf
       persistState()
     }
   }
@@ -335,44 +361,88 @@ Item {
     }
   }
 
+  // Root-level mutators are the single source of truth. The IpcHandler below
+  // delegates to them, and the bar panel (BarWidget.qml) calls them directly
+  // on this service instance when it can reach it — so a click updates state
+  // reactively in-process with no round-trip.
+
+  // Enable + (optionally) set a new video, then persist.
+  function applyPlay(path) {
+    var p = String(path || "").trim()
+    if (p) root.videoPath = p
+    root.enabled = true
+    root.manualPaused = false
+    root.persistState()
+    return root.statusObject()
+  }
+
+  // Disable rendering entirely (surfaces destroyed, static wallpaper shows).
+  function applyStop() {
+    root.enabled = false
+    root.manualPaused = false
+    root.persistState()
+  }
+
+  // Flip enabled on/off. Returns the new enabled state.
+  function applyToggle() {
+    root.enabled = !root.enabled
+    if (root.enabled) root.manualPaused = false
+    root.persistState()
+    return root.enabled
+  }
+
+  function applyPause() { root.manualPaused = true }
+  function applyResume() { root.manualPaused = false }
+
+  // Live monitor targeting. Persists and re-evaluates activeScreens, so the
+  // video surfaces move/appear/disappear with NO shell restart.
+  function applySetOutput(name) {
+    var n = String(name || "all").trim()
+    root.output = n === "" ? "all" : n
+    root.persistState()
+    return root.statusObject()
+  }
+
+  function applySetPauseOnFullscreen(on) {
+    root.pauseOnFullscreen = (on === true || String(on) === "true")
+    root.persistState()
+    return root.statusObject()
+  }
+
   IpcHandler {
     target: "motion-wallpaper"
 
-    // Enable + (optionally) set a new video, then persist.
     function play(path: string): string {
-      var p = String(path || "").trim()
-      if (p) root.videoPath = p
-      root.enabled = true
-      root.manualPaused = false
-      root.persistState()
-      return JSON.stringify(root.statusObject())
+      return JSON.stringify(root.applyPlay(path))
     }
 
-    // Disable rendering entirely (surfaces destroyed, static wallpaper shows).
     function stop(): string {
-      root.enabled = false
-      root.manualPaused = false
-      root.persistState()
+      root.applyStop()
       return "stopped"
     }
 
-    // Flip enabled on/off.
     function toggle(): string {
-      root.enabled = !root.enabled
-      if (root.enabled) root.manualPaused = false
-      root.persistState()
-      return root.enabled ? "on" : "off"
+      return root.applyToggle() ? "on" : "off"
     }
 
-    // Pause playback without tearing down the surface.
     function pause(): string {
-      root.manualPaused = true
+      root.applyPause()
       return "paused"
     }
 
     function resume(): string {
-      root.manualPaused = false
+      root.applyResume()
       return "playing"
+    }
+
+    // Set targeted monitor: "all" or a connector name (e.g. "HDMI-A-1").
+    function setOutput(name: string): string {
+      return JSON.stringify(root.applySetOutput(name))
+    }
+
+    // Enable/disable auto-pause on fullscreen: "true" / "false".
+    function setPauseOnFullscreen(on: string): string {
+      return JSON.stringify(root.applySetPauseOnFullscreen(on))
     }
 
     function status(): string {

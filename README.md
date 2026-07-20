@@ -4,9 +4,9 @@
 
 Animated video wallpapers for [Omarchy 4](https://omarchy.com) (Arch Linux + Hyprland + Quickshell).
 
-On Omarchy 4 the desktop shell moved to **omarchy-shell** (Quickshell/QML) and the old `swaybg` wallpaper daemon is gone — the wallpaper is now painted by a QML plugin. Motion Wallpaper plugs straight into that model: a native **omarchy-shell service plugin** renders a looping, muted video on the Wayland background layer, above the first-party static wallpaper, with native fullscreen auto-pause and persistent state. A [gum](https://github.com/charmbracelet/gum)-powered TUI/CLI (`motion-wallpaper`) that follows your active Omarchy theme drives it over the shell's IPC.
+On Omarchy 4 the desktop shell moved to **omarchy-shell** (Quickshell/QML) and the old `swaybg` wallpaper daemon is gone — the wallpaper is now painted by a QML plugin. Motion Wallpaper plugs straight into that model: a native **omarchy-shell plugin** renders a looping, muted video on the Wayland background layer, above the first-party static wallpaper, with native fullscreen auto-pause and persistent state. It ships a **bar widget + dropdown panel** (click the film icon in the bar) to play/pause/stop, pick a clip, choose the screen, and toggle auto-pause — all native, themed to match the rest of the shell. A thin `motion-wallpaper` CLI covers keybinds and scripting.
 
-No `mpvpaper`, `swaybg`, `socat` watcher or systemd unit — the shell plugin does the rendering, pausing, and state itself.
+No `mpvpaper`, `swaybg`, `socat` watcher, systemd unit, or terminal TUI — the shell plugin does the rendering, the controls, pausing, and state itself.
 
 > **Older Omarchy (Waybar/swaybg)?** This release targets Omarchy 4+. Use a legacy mpvpaper-based release for Omarchy ≤3.
 
@@ -25,35 +25,43 @@ The installer checks dependencies, installs the plugin, enables it in `shell.jso
 
 - **OS**: [Omarchy 4](https://omarchy.com)+ (Arch Linux) with **omarchy-shell** (Quickshell) at `/usr/share/omarchy/shell`
 - **Compositor**: Hyprland
-- **Packages**: `qt6-multimedia` (video decode), `gum`, `jq`, `python`, `hyprland` — installed automatically if missing (no AUR helper needed)
+- **Packages**: `qt6-multimedia` (video decode), `jq`, `python`, `hyprland` — installed automatically if missing (no AUR helper needed)
 
 ## What It Installs
 
 | Path | Purpose |
 |------|---------|
-| `~/.config/omarchy/plugins/nosignal.motion-wallpaper/` | the QML service plugin (`manifest.json` + `Service.qml`) |
-| `~/.local/bin/motion-wallpaper` | TUI + CLI control |
-| `~/.local/share/applications/motion-wallpaper.desktop` | app-menu / Walker entry (floating TUI) |
+| `~/.config/omarchy/plugins/nosignal.motion-wallpaper/` | the QML plugin (service + bar widget + panel) |
+| `~/.local/bin/motion-wallpaper` | CLI control (keybinds / scripting) |
+| `~/.local/share/applications/motion-wallpaper.desktop` | Walker entry (toggles the wallpaper) |
 | `~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg` | icon |
 
-It also adds `{ "id": "nosignal.motion-wallpaper", … }` to your `~/.config/omarchy/shell.json` `plugins[]` array (a timestamped backup is written first) and restarts the shell to load it.
+It also registers the plugin in your `~/.config/omarchy/shell.json` — adding it to `plugins[]` and its bar widget to `bar.layout.right` (a timestamped backup is written first) — and restarts the shell to load it.
 
 ## Usage
 
-### From the app launcher
+### The bar widget + panel
 
-Open Walker (`SUPER`), type **Motion Wallpaper**, hit enter — the TUI opens as a floating window, themed to match your desktop. Pick a video and it plays immediately.
+Click the **film icon** in the bar to open the control panel. From there you can:
+
+- **Play / Pause / Stop** the video
+- **Pick a clip** from a list of videos in `~/Videos/Wallpapers` and `~/Videos`
+- **Choose the screen** — all monitors or a specific output (applies instantly)
+- **Toggle auto-pause** when a fullscreen window covers the wallpaper
+
+The bar icon reflects state at a glance: accent when playing, amber when paused, dim when stopped.
 
 ### From the terminal
 
 ```bash
-motion-wallpaper            # interactive TUI (default)
-motion-wallpaper status     # print current state
-motion-wallpaper stop       # stop; static wallpaper shows through
-motion-wallpaper pause      # pause playback (surface stays up)
-motion-wallpaper resume     # resume
-motion-wallpaper change     # pick a new video (interactive)
-motion-wallpaper play ~/Videos/Wallpapers/clip.mp4   # set + play a file directly
+motion-wallpaper                 # print current state (default)
+motion-wallpaper play ~/Videos/Wallpapers/clip.mp4
+motion-wallpaper stop            # stop; static wallpaper shows through
+motion-wallpaper toggle          # flip on/off
+motion-wallpaper pause           # pause / resume
+motion-wallpaper resume
+motion-wallpaper screen HDMI-A-1 # or: screen all
+motion-wallpaper autopause off   # or: on
 ```
 
 ### With a keybind
@@ -66,11 +74,11 @@ bindd = SUPER ALT, W, Motion wallpaper, exec, motion-wallpaper toggle
 
 ### Video library folder
 
-Drop clips in **`~/Videos/Wallpapers/`** and they appear as a one-key quick-pick list in the TUI. Anything else is reachable via the built-in filesystem browser (confined to your home directory).
+Drop clips in **`~/Videos/Wallpapers/`** and they appear in the panel's list. To play a file from anywhere else, use `motion-wallpaper play <path>`.
 
 ### Multiple monitors
 
-The TUI's **Change output monitor** action lets you target a single output or all of them. The video plays only on the targeted monitor(s); the rest keep the normal static wallpaper. (Output is a shell config option, so changing it restarts the shell briefly to apply.)
+The panel's **screen** dropdown (or `motion-wallpaper screen <name|all>`) targets a single output or all of them, applied live with no shell restart. The video plays only on the targeted monitor(s); the rest keep the normal static wallpaper.
 
 ### Persistence
 
@@ -79,9 +87,9 @@ A playing wallpaper **resumes automatically after a reboot** — the plugin pers
 ## How It Works
 
 - **Rendering** — the plugin creates one `PanelWindow` per targeted monitor on the Wayland **background layer** (namespace `omarchy-motion-background`), using QtMultimedia `MediaPlayer` + `VideoOutput` (looped, muted, `PreserveAspectCrop`). It loads after the first-party static-wallpaper surface, so it stacks above it. When no video is set or the file is missing, no surface is created at all — so the static wallpaper shows through (never a black or frozen frame).
-- **Auto-pause on fullscreen** — the plugin listens to Hyprland's event stream (`Quickshell.Hyprland`) and, on any fullscreen-affecting event, reads per-monitor ground truth from `hyprctl` to pause the video on exactly the monitor whose visible workspace has a fullscreen window. Toggle via the `pauseOnFullscreen` config key. This replaces the old external socat watcher.
+- **Auto-pause on fullscreen** — the plugin listens to Hyprland's event stream (`Quickshell.Hyprland`) and, on any fullscreen-affecting event, reads per-monitor ground truth from `hyprctl` to pause the video on exactly the monitor whose visible workspace has a fullscreen window. Toggle it from the panel (or `motion-wallpaper autopause on|off`). This replaces the old external socat watcher.
 - **Theme changes** — nothing to do: switch themes freely, the first-party static wallpaper updates underneath. The video keeps playing until you stop it.
-- **Control** — the CLI is a thin client over the shell IPC target `motion-wallpaper` (`play` / `stop` / `toggle` / `pause` / `resume` / `status`), reachable directly as `qs -p /usr/share/omarchy/shell ipc call motion-wallpaper <fn>`.
+- **Controls** — the bar widget and panel talk to the plugin's service instance in-process. The `motion-wallpaper` CLI is a thin client over the same shell IPC target (`play` / `stop` / `toggle` / `pause` / `resume` / `status` / `setOutput` / `setPauseOnFullscreen`), reachable directly as `qs -p /usr/share/omarchy/shell ipc call motion-wallpaper <fn>`. State (video, enabled, screen, auto-pause) persists to `~/.local/state/motion-wallpaper/state.json`.
 
 ## Supported Video Formats
 
@@ -98,7 +106,7 @@ Video wallpaper decodes continuously on the GPU, so it uses more power than a st
 
 ## Troubleshooting
 
-- **TUI says the plugin isn't loaded** — run `./wallpaper.sh` (or restart the shell with `omarchy-restart-shell`). Confirm with `qs -p /usr/share/omarchy/shell ipc show | grep motion-wallpaper`.
+- **No bar icon / "plugin isn't loaded"** — run `./wallpaper.sh` (or restart the shell with `omarchy-restart-shell`). Confirm with `qs -p /usr/share/omarchy/shell ipc show | grep motion-wallpaper`.
 - **No video appears** — check `motion-wallpaper status`: `videoFileExists: false` means the saved path is gone; pick a new file. Watch for QML errors in the shell's journal.
 - **Edited the plugin QML** — plugin code changes need a full `omarchy-restart-shell`; `ipc call shell rescanPlugins` only *discovers* newly-added plugins, it doesn't reload edited code. Don't use `omarchy-refresh-shell` — it resets `shell.json`.
 - **Logs** — `~/.cache/motion-wallpaper.log` (CLI) and the shell's own stderr/journal (plugin).
@@ -114,7 +122,8 @@ rm -f  ~/.local/bin/motion-wallpaper \
        ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg
 rm -rf ~/.local/state/motion-wallpaper
 
-# Remove the plugin entry from ~/.config/omarchy/shell.json plugins[], then:
+# Remove its entries from ~/.config/omarchy/shell.json (plugins[] and
+# bar.layout.right[]), then:
 omarchy-restart-shell
 ```
 

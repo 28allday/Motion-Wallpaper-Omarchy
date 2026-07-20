@@ -6,9 +6,16 @@
   "author": "Gavin Nugent",
   "license": "MIT",
   "description": "Native looping video wallpaper for omarchy-shell. Renders a muted, looping video on the background layer above the static wallpaper, per-monitor targeting, with native auto-pause on fullscreen. Replaces the old mpvpaper tool. Control via: qs -p /usr/share/omarchy/shell ipc call motion-wallpaper <fn>",
-  "kinds": ["service"],
+  "kinds": ["service", "bar-widget"],
   "entryPoints": {
-    "service": "Service.qml"
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Motion Wallpaper",
+    "description": "Play, pause and pick looping video wallpapers.",
+    "category": "Desktop",
+    "allowMultiple": false
   },
   "service": {
     "displayName": "Motion Wallpaper",

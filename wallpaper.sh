@@ -51,9 +51,9 @@ for f in "$PLUGIN_SRC/manifest.json" "$PLUGIN_SRC/Service.qml" "$CLI_SRC" "$ICON
 done
 
 # ----- dependencies -----------------------------------------------------------
-# Package names differ from command names, so probe both.
+# Package names differ from command names, so probe both. The UI is native
+# (bar widget + panel), so no gum/terminal deps — just video decode + helpers.
 MISSING_PKGS=()
-command -v gum      >/dev/null 2>&1 || MISSING_PKGS+=("gum")
 command -v jq       >/dev/null 2>&1 || MISSING_PKGS+=("jq")
 command -v python3  >/dev/null 2>&1 || MISSING_PKGS+=("python")
 command -v hyprctl  >/dev/null 2>&1 || MISSING_PKGS+=("hyprland")
@@ -64,7 +64,7 @@ if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
   echo "Installing required packages: ${MISSING_PKGS[*]}"
   sudo pacman -S --needed "${MISSING_PKGS[@]}"
 else
-  echo "✓ Dependencies present (qt6-multimedia, gum, jq, python3, hyprland)"
+  echo "✓ Dependencies present (qt6-multimedia, jq, python3, hyprland)"
 fi
 
 # ----- install the plugin -----------------------------------------------------
@@ -79,23 +79,29 @@ install -D -m 644 "$PLUGIN_SRC/Service.qml"   "$DEST/Service.qml"
 echo "✓ Plugin installed to $DEST"
 
 # ----- enable it in shell.json ------------------------------------------------
-# Add the plugin id to .plugins[] if absent, seeded disabled with no video so
-# the first launch shows the normal static wallpaper until the user picks a clip.
+# Add the plugin to .plugins[] (seeded disabled, no video, so first launch shows
+# the normal static wallpaper) AND add its bar widget to bar.layout.right so the
+# control panel is reachable from the bar. Both are added only if absent.
 if [ -f "$SHELL_JSON" ]; then
   BACKUP="$SHELL_JSON.bak.$(date +%s)"
   cp -f "$SHELL_JSON" "$BACKUP"
   TMP="$(mktemp "${SHELL_JSON}.XXXXXX")"
   if jq --arg id "$PLUGIN_ID" '
       .plugins = (.plugins // []) |
-      if any(.plugins[]; .id == $id) then .
-      else .plugins += [{ "id": $id, "output": "all", "pauseOnFullscreen": true, "enabled": false }]
-      end' "$SHELL_JSON" > "$TMP"; then
+      (if any(.plugins[]; .id == $id) then .
+       else .plugins += [{ "id": $id, "output": "all", "pauseOnFullscreen": true, "enabled": false }]
+       end) |
+      .bar.layout.right = (.bar.layout.right // []) |
+      (if any(.bar.layout.right[]; .id == $id) then .
+       else .bar.layout.right += [{ "id": $id }]
+       end)' "$SHELL_JSON" > "$TMP"; then
     mv -f "$TMP" "$SHELL_JSON"
-    echo "✓ Plugin enabled in shell.json (backup: $BACKUP)"
+    echo "✓ Plugin + bar widget registered in shell.json (backup: $BACKUP)"
   else
     rm -f "$TMP"
-    echo "⚠️  Could not edit $SHELL_JSON automatically. Add this to its \"plugins\" array:" >&2
-    echo '     { "id": "nosignal.motion-wallpaper", "output": "all", "pauseOnFullscreen": true, "enabled": false }' >&2
+    echo "⚠️  Could not edit $SHELL_JSON automatically. Add to \"plugins\" and \"bar.layout.right\":" >&2
+    echo '     plugins[]:          { "id": "nosignal.motion-wallpaper", "output": "all", "pauseOnFullscreen": true, "enabled": false }' >&2
+    echo '     bar.layout.right[]: { "id": "nosignal.motion-wallpaper" }' >&2
   fi
 else
   echo "⚠️  $SHELL_JSON not found — is omarchy-shell configured? Skipping auto-enable." >&2
@@ -112,15 +118,16 @@ command -v gtk-update-icon-cache >/dev/null 2>&1 && \
   gtk-update-icon-cache -f -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 mkdir -p "$HOME/.local/share/applications"
-# Launch in a floating terminal via Omarchy's TUI.float app-id (the default
-# Hyprland windowrule tags it floating), same pattern omarchy-tui-install uses.
+# The interactive UI is the bar widget + panel. This launcher is a convenience:
+# from Walker, "Motion Wallpaper" flips the video on/off (no window — it just
+# fires an IPC toggle and exits).
 cat > "$HOME/.local/share/applications/motion-wallpaper.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=Motion Wallpaper
-Comment=Play an animated video wallpaper (TUI)
-Exec=xdg-terminal-exec --app-id=TUI.float -e $HOME/.local/bin/motion-wallpaper
+Comment=Toggle the animated video wallpaper on/off
+Exec=$HOME/.local/bin/motion-wallpaper toggle
 Icon=motion-wallpaper
 Terminal=false
 Categories=Utility;Settings;DesktopSettings;
@@ -149,15 +156,17 @@ cat <<EOF
 
 === Install complete ===
 
-✓ 'Motion Wallpaper' added to your application menu
-✓ CLI: motion-wallpaper  (run with no args for the TUI)
+✓ Bar widget added — click the ◐ film icon in the bar for the control panel
+✓ CLI: motion-wallpaper  (scripting / keybinds)
 
 Quick start:
-  motion-wallpaper            # interactive: pick a video and play
-  motion-wallpaper status
-  motion-wallpaper stop
+  Click the film icon in the bar → pick a video from the panel.
+  Or from a terminal:
+    motion-wallpaper play ~/Videos/Wallpapers/clip.mp4
+    motion-wallpaper status
+    motion-wallpaper stop
 
-Tip: drop clips in ~/Videos/Wallpapers/ for one-key quick-pick.
+Tip: drop clips in ~/Videos/Wallpapers/ — they show up in the panel's list.
 
 Optional Hyprland keybind (SUPER+W is Close window in Omarchy — avoid it):
   bindd = SUPER ALT, W, Motion wallpaper, exec, motion-wallpaper toggle
