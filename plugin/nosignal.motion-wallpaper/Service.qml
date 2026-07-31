@@ -206,9 +206,9 @@ Item {
   Component.onCompleted: mkStateDir.running = true
 
   // ------------------------------------------------------- fullscreen watch
-  // Native: Quickshell.Hyprland.rawEvent tells us WHEN to re-check; hyprctl
-  // gives us per-monitor ground truth (which monitor's visible workspace has a
-  // fullscreen window). Replaces the old external socat watcher.
+  // Quickshell.Hyprland.rawEvent tells us WHEN to re-check; hyprctl gives us
+  // per-monitor ground truth (which monitor's visible workspace has a
+  // fullscreen window).
   property var fullscreenMonitors: ({})   // { "HDMI-A-1": true, ... }
 
   readonly property string fsScript:

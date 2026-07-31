@@ -3,18 +3,18 @@
 # Motion Wallpaper installer for Omarchy 4 (Quickshell / omarchy-shell).
 #
 # Installs a native omarchy-shell service plugin that renders a looping, muted
-# video on the Wayland background layer, plus a gum TUI/CLI to control it.
+# video on the Wayland background layer, plus a thin CLI to control it.
 #
 # Installs:
 #   ~/.config/omarchy/plugins/nosignal.motion-wallpaper/   the QML service plugin
-#   ~/.local/bin/motion-wallpaper                          TUI + CLI control
+#   ~/.local/bin/motion-wallpaper                          CLI control
 #   ~/.local/share/applications/motion-wallpaper.desktop   app-menu entry
 #   ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg
 #   (enables the plugin id in ~/.config/omarchy/shell.json)
 #
-# Dependencies: qt6-multimedia (video decode), gum, jq, python3, hyprland.
-# There is NO mpvpaper, swaybg, socat or systemd unit any more — the shell
-# plugin does the rendering, fullscreen auto-pause, and state persistence.
+# Dependencies: qt6-multimedia (video decode), jq, python3, hyprland.
+# The shell plugin does the rendering, fullscreen auto-pause and state
+# persistence itself — no external daemon, watcher or systemd unit.
 # ==============================================================================
 
 set -euo pipefail
@@ -39,8 +39,7 @@ fi
 if [ ! -d "$QS_SHELL" ] || ! command -v qs >/dev/null 2>&1; then
   cat >&2 <<MSG
 ERROR: omarchy-shell (Quickshell) not found at $QS_SHELL.
-This plugin targets Omarchy 4+. On older Omarchy (Waybar/swaybg) use the
-legacy mpvpaper-based release instead.
+Motion Wallpaper requires Omarchy 4+.
 MSG
   exit 1
 fi
@@ -53,7 +52,8 @@ done
 
 # ----- dependencies -----------------------------------------------------------
 # Package names differ from command names, so probe both. The UI is native
-# (bar widget + panel), so no gum/terminal deps — just video decode + helpers.
+# (bar widget + panel), so there are no terminal-UI deps — just video decode
+# and helpers.
 MISSING_PKGS=()
 command -v jq       >/dev/null 2>&1 || MISSING_PKGS+=("jq")
 command -v python3  >/dev/null 2>&1 || MISSING_PKGS+=("python")
