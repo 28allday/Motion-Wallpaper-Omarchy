@@ -45,7 +45,7 @@ It also registers the plugin in your `~/.config/omarchy/shell.json` — adding i
 Click the **film icon** in the bar to open the control panel. From there you can:
 
 - **Play / Pause / Stop** the video
-- **Pick a clip** from a list of videos in `~/Videos/Wallpapers` and `~/Videos`
+- **Pick a clip** from a list of videos in `~/Videos/Wallpapers` and `~/Videos` — clips cross-fade into each other, so the desktop never flashes through mid-switch
 - **Choose the screen** — all monitors or a specific output (applies instantly)
 - **Toggle auto-pause** when a fullscreen window covers the wallpaper
 

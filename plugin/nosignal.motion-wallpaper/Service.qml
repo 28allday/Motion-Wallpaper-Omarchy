@@ -306,40 +306,160 @@ Item {
                                             && (root.fullscreenMonitors[monName] === true)
       readonly property bool shouldPlay: !root.manualPaused && !monFullscreen
 
+      // ---- A/B double buffer ----
+      // Changing the clip used to blink the desktop: assigning a new source to
+      // a single MediaPlayer clears its VideoOutput while the new file opens,
+      // so the static wallpaper showed through for a few hundred ms. Now the
+      // incoming clip loads into whichever pair is idle and plays there
+      // off-screen, and we only cross over once it has actually delivered a
+      // video frame — something is on screen at every moment. The outgoing
+      // player is retired after the fade, so steady state is still one decoder.
+      property bool frontIsA: true
+      readonly property var frontPlayer: frontIsA ? playerA : playerB
+      readonly property var backPlayer: frontIsA ? playerB : playerA
+      property string frontUrl: ""      // url currently in the front pair
+      property string pendingUrl: ""    // non-empty while a cross-over is in flight
+      readonly property int fadeMs: 220
+
       VideoOutput {
-        id: videoOut
+        id: outA
         anchors.fill: parent
         fillMode: VideoOutput.PreserveAspectCrop
+        opacity: panel.frontIsA ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: panel.fadeMs; easing.type: Easing.InOutQuad } }
+      }
+
+      VideoOutput {
+        id: outB
+        anchors.fill: parent
+        fillMode: VideoOutput.PreserveAspectCrop
+        opacity: panel.frontIsA ? 0 : 1
+        Behavior on opacity { NumberAnimation { duration: panel.fadeMs; easing.type: Easing.InOutQuad } }
       }
 
       MediaPlayer {
-        id: player
-        source: root.effectiveVideoUrl
-        videoOutput: videoOut
+        id: playerA
+        videoOutput: outA
         loops: MediaPlayer.Infinite
         audioOutput: AudioOutput { muted: true; volume: 0 }
+        onErrorOccurred: function(err, str) { panel.handleError(playerA, err, str) }
+      }
 
-        onErrorOccurred: function(err, str) {
-          if (err !== MediaPlayer.NoError)
-            console.warn("motion-wallpaper: MediaPlayer error on", panel.monName, ":", str)
+      MediaPlayer {
+        id: playerB
+        videoOutput: outB
+        loops: MediaPlayer.Infinite
+        audioOutput: AudioOutput { muted: true; volume: 0 }
+        onErrorOccurred: function(err, str) { panel.handleError(playerB, err, str) }
+      }
+
+      // The back pair's first frame is the cue to cross over. Gated on a swap
+      // being in flight so this is not running JS on every decoded frame.
+      Connections {
+        target: outA.videoSink
+        enabled: panel.pendingUrl !== "" && !panel.frontIsA
+        function onVideoFrameChanged() { panel.crossOver() }
+      }
+
+      Connections {
+        target: outB.videoSink
+        enabled: panel.pendingUrl !== "" && panel.frontIsA
+        function onVideoFrameChanged() { panel.crossOver() }
+      }
+
+      // Safety net: if the incoming clip never delivers a frame AND never
+      // errors, don't sit on the old one forever.
+      Timer {
+        id: swapTimeout
+        interval: 4000
+        repeat: false
+        onTriggered: if (panel.pendingUrl !== "") panel.crossOver()
+      }
+
+      // Retire the outgoing player once the fade has finished.
+      Timer {
+        id: retire
+        interval: panel.fadeMs + 60
+        repeat: false
+        property var victim: null
+        onTriggered: {
+          if (victim) { victim.stop(); victim.source = "" }
+          victim = null
         }
+      }
+
+      function crossOver() {
+        if (pendingUrl === "") return
+        var outgoing = frontPlayer
+        swapTimeout.stop()
+        frontUrl = pendingUrl
+        pendingUrl = ""
+        frontIsA = !frontIsA
+        retire.victim = outgoing
+        retire.restart()
+        Qt.callLater(panel.sync)
+      }
+
+      function handleError(who, err, str) {
+        if (err === MediaPlayer.NoError) return
+        console.warn("motion-wallpaper: MediaPlayer error on", panel.monName, ":", str)
+        // A bad incoming clip must not take the wallpaper down with it:
+        // abandon the swap and keep whatever is already on screen.
+        if (who === backPlayer && pendingUrl !== "") {
+          swapTimeout.stop()
+          pendingUrl = ""
+          who.stop()
+          who.source = ""
+        }
+      }
+
+      // Point the pairs at `url`, crossing over if something is already up.
+      function requestUrl(url) {
+        if (url === "") {
+          swapTimeout.stop()
+          pendingUrl = ""
+          frontUrl = ""
+          playerA.stop(); playerB.stop()
+          playerA.source = ""; playerB.source = ""
+          return
+        }
+        if (url === pendingUrl) return
+        if (url === frontUrl) {          // already showing — cancel any swap back to it
+          if (pendingUrl !== "") {
+            swapTimeout.stop()
+            pendingUrl = ""
+            backPlayer.stop()
+            backPlayer.source = ""
+          }
+          sync()
+          return
+        }
+        if (frontUrl === "") {           // nothing on screen yet — load straight in
+          frontUrl = url
+          frontPlayer.source = url
+          Qt.callLater(panel.sync)
+          return
+        }
+        pendingUrl = url
+        backPlayer.source = url
+        backPlayer.play()                // must run to produce the frame we wait for
+        swapTimeout.restart()
       }
 
       function sync() {
-        if (root.effectiveVideoUrl === "") { player.stop(); return }
+        var p = frontPlayer
+        if (frontUrl === "") { p.stop(); return }
         if (shouldPlay) {
-          if (player.playbackState !== MediaPlayer.PlayingState) player.play()
+          if (p.playbackState !== MediaPlayer.PlayingState) p.play()
         } else {
-          if (player.playbackState === MediaPlayer.PlayingState) player.pause()
+          if (p.playbackState === MediaPlayer.PlayingState) p.pause()
         }
       }
 
+      readonly property string wantUrl: root.effectiveVideoUrl
+      onWantUrlChanged: requestUrl(wantUrl)
       onShouldPlayChanged: sync()
-      Component.onCompleted: sync()
-      Connections {
-        target: player
-        function onSourceChanged() { Qt.callLater(panel.sync) }
-      }
+      Component.onCompleted: requestUrl(wantUrl)
     }
   }
 
