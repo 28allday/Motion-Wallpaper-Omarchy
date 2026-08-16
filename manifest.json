@@ -17,23 +17,5 @@
     "category": "Desktop",
     "defaultSection": "right",
     "allowMultiple": false
-  },
-  "service": {
-    "displayName": "Motion Wallpaper",
-    "description": "Looping video wallpaper on the background layer.",
-    "category": "Appearance",
-    "defaults": {
-      "videoPath": "",
-      "output": "all",
-      "screenVideos": {},
-      "pauseOnFullscreen": true,
-      "enabled": true
-    },
-    "schema": [
-      { "key": "videoPath", "type": "path", "label": "Default video file", "defaultValue": "" },
-      { "key": "output", "type": "string", "label": "Output for the default video (monitor connector name, or 'all')", "defaultValue": "all" },
-      { "key": "pauseOnFullscreen", "type": "boolean", "label": "Pause on fullscreen window", "defaultValue": true },
-      { "key": "enabled", "type": "boolean", "label": "Enabled", "defaultValue": true }
-    ]
   }
 }

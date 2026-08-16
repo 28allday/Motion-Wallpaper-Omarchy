@@ -160,6 +160,15 @@ are easy to get wrong:
   updated. `wallpaper.sh` delegates to `omarchy plugin add` for this reason.
 - **`barWidget.defaultSection`** decides where the icon lands and which option is
   pre-selected in the placement prompt. Omitting it silently means `center`.
+- **There is no `service` block in the manifest vocabulary.** The shell reads
+  `defaults`/`schema`/`settingsForm` off **`barWidget`** only (`shell.qml`'s
+  bar-widget registration), and hands a service nothing but `omarchyPath`,
+  `shell`, `manifest`, `barWidgetRegistry` and `pluginRegistry` (`ensureService`).
+  A `service: { defaults, schema }` block validates, installs and is then read by
+  nothing — this plugin carried one for a while. Settings for a service kind come
+  from its own read of the `plugins[]` entry, which is why `pluginConfig` in
+  `Service.qml` parses `shell.shellConfig` itself. `plugins/services/media` is
+  the first-party plugin with this exact shape; copy that.
 - **Do not hand-write a `plugins[]` entry to enable the plugin.**
   `PluginRegistry.isEnabled()` → `findEntryLocation()` searches the bar layout
   *before* `plugins[]`, so the bar entry written by `omarchy plugin enable`
