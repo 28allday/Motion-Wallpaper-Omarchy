@@ -4,8 +4,10 @@ Working notes for picking the project back up. Last updated: 2026-08-16.
 
 ## Status
 
-**PARKED, fully synced 2026-08-16.** Omarchy 4 native plugin, working and
-installed on this box. Working tree clean.
+**Repackaged to Omarchy conventions 2026-08-16 (v0.2.0).** Omarchy 4 native
+plugin, working and installed on this box — now installed the supported way, as
+a git checkout via `omarchy plugin add`, verified end to end here. See
+"Packaging conventions" below for what changed and why.
 
 ✅ **Dual push done 2026-08-16** — the long-standing open item is closed. All
 three refs sit at `d982192`, and `legacy-omarchy3` now exists on both remotes
@@ -33,14 +35,59 @@ the cross-fade `Service.qml`. No drift despite the copy-install gotcha below.
 2. Untested paths: multi-monitor (this box is single-output HDMI-A-1), and the
    `output` selector beyond `"all"`. Needs Gav + a second display.
 
+## Packaging conventions (2026-08-16, `b63d3d4` + follow-up)
+
+Audited against the real Omarchy source (`omarchy-plugin-add`,
+`omarchy-plugin-validate`, `shell/services/PluginRegistry.qml`) — the plugin
+*code* was already conventional, the packaging was not. What changed:
+
+- **`manifest.json` now lives at the repo ROOT**, not under
+  `plugin/nosignal.motion-wallpaper/`. A plugin *is* a git repo with a root
+  manifest; `omarchy-plugin-add` clones the repo and runs `validate` on the
+  clone root. With the old layout `omarchy plugin add <this repo>` failed on
+  "missing manifest.json" — **the supported install path could never work.**
+  Check it with `omarchy plugin validate .` from the repo root.
+- **Install is now a git clone, not a copy.** `omarchy plugin update` is
+  `git fetch` + `merge --ff-only`, so a copy-installed plugin can never be
+  updated. `wallpaper.sh` detects a pre-0.2 copy-install (no `.git`, manifest id
+  matches) and replaces it.
+- **`barWidget.defaultSection: "right"`** added. Omitting it silently defaults
+  to **center** — this is the same manifest mistake that bit network-scan, and
+  it is not a bug in `omarchy plugin enable`.
+- **No more hand-editing `shell.json`.** The old installer wrote a `plugins[]`
+  entry *and* a `bar.layout.right` entry. Only one is needed:
+  `PluginRegistry.isEnabled()` → `findEntryLocation()` searches the bar layout
+  **before** `plugins[]`, so the bar entry alone enables both the widget and the
+  service. The duplicate's only effect was making `omarchy plugin disable` take
+  two runs. A `plugins[]` entry is still *supported* as an optional settings
+  seed — `Service.qml:pluginConfig` reads it and falls back to `{}` — it is just
+  no longer created automatically.
+- **The CLI goes through `omarchy-shell <target> <method>`**, not
+  `qs -p /usr/share/omarchy/shell ipc call`. The wrapper resolves
+  `$OMARCHY_PATH`, recovers `WAYLAND_DISPLAY` for callers outside the session
+  (ssh/TTY), applies a timeout, and turns "Target not found." into a nonzero
+  exit — which is what the CLI's not-loaded/not-running messages now key off.
+
+**Known upstream race:** `omarchy plugin add --yes` enables through the running
+shell, whose registry may not have rescanned the just-cloned manifest yet — so
+`defaultSection` reads as unset and the widget lands in **center**. Reproduced
+on install here, then confirmed a later disable/enable puts it in `right`.
+`wallpaper.sh` re-places the widget once after an unattended install. The
+interactive path is unaffected: `omarchy-plugin-add` reads `defaultSection`
+straight off the cloned file for its `gum choose` prompt.
+
+**Keep the placement prompt.** `wallpaper.sh` only passes `--yes` when there is
+no TTY. In a terminal the user gets Omarchy's own unsandboxed-code warning and
+the left/center/right chooser; their choice then wins over the re-place guard.
+
 ## Gotchas that will bite you
 
-- **The plugin installs as a COPY, not a symlink.** `wallpaper.sh` deliberately
-  replaces any symlink with a real copy in
-  `~/.config/omarchy/plugins/nosignal.motion-wallpaper/`. So **editing the repo
-  does not change the running plugin** — re-run `wallpaper.sh`, or copy the files
-  over, then restart. Repo and installed copy can silently drift; check with
-  `diff -rq plugin/nosignal.motion-wallpaper ~/.config/omarchy/plugins/nosignal.motion-wallpaper`.
+- **The installed plugin is a git checkout of this repo** (since 0.2.0), so it
+  does not track your working tree. Editing the repo does not change the running
+  plugin — for dev, symlink `~/.config/omarchy/plugins/nosignal.motion-wallpaper`
+  at this checkout instead (`wallpaper.sh` detects and preserves a symlink),
+  then `omarchy-restart-shell`. Note `omarchy plugin validate` **refuses
+  symlinks inside** a plugin folder, but a symlinked plugin *folder* is fine.
 - **Reload after QML edits = `omarchy-restart-shell`.** `rescanPlugins` does NOT
   reload edited code. Never `omarchy-refresh-shell` — it resets shell.json.
 - **`hyprctl dispatch workspace N` does not work on Omarchy 4.** Dispatch is now a

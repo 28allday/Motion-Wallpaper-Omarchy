@@ -75,6 +75,14 @@ fi
 # Three cases: already running from inside the plugin directory (someone ran
 # `omarchy plugin add` first and is now just fetching the extras); a legacy
 # copy-install from an older version of this script; or a fresh install.
+
+# In a terminal, `omarchy plugin add` shows its unsandboxed-code warning and
+# asks which bar section to put the widget in (pre-selecting the manifest's
+# defaultSection). That prompt is worth keeping, so --yes is only used when
+# there is no one to answer it.
+interactive() { [ -t 0 ] && [ -t 1 ]; }
+PLACEMENT_CHOSEN=0
+
 install_plugin() {
   if [ "$SCRIPT_DIR" = "$PLUGIN_DIR" ]; then
     echo "✓ Running from the installed plugin — leaving it alone"
@@ -111,9 +119,36 @@ install_plugin() {
       || git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null \
       || echo "$SCRIPT_DIR")"
   echo "→ Adding the plugin from $url"
-  omarchy plugin add "$url" --enable --yes
+  if interactive; then
+    omarchy plugin add "$url" --enable
+    PLACEMENT_CHOSEN=1
+  else
+    omarchy plugin add "$url" --enable --yes
+  fi
 }
 install_plugin
+
+# ----- put the widget where the manifest asks ---------------------------------
+# Only for the unattended path. `omarchy plugin add --yes` enables through the
+# running shell, whose plugin registry may not have rescanned the freshly-cloned
+# manifest yet; when it has not, barWidget.defaultSection is unreadable and the
+# widget lands in the default section (center) instead. If the user was asked
+# where to put it, their answer wins and this does nothing.
+place_widget() {
+  if (( PLACEMENT_CHOSEN )); then return 0; fi
+  local want current
+  want="$(jq -r '.barWidget.defaultSection // "center"' "$SCRIPT_DIR/manifest.json")"
+  current="$(jq -r --arg id "$PLUGIN_ID" '
+      .bar.layout // {} | to_entries[]
+      | select(.value | any(.id == $id)) | .key' \
+      "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json" 2>/dev/null || true)"
+  # Not in the bar at all (not enabled, or user removed it) — not ours to fix.
+  [ -n "$current" ] || return 0
+  [ "$current" != "$want" ] || return 0
+  omarchy bar move "$PLUGIN_ID" --section "$want" >/dev/null 2>&1 &&
+    echo "✓ Moved the bar widget to the $want section"
+}
+place_widget
 
 # ----- clean up after the old installer ---------------------------------------
 # Versions before 0.2 hand-wrote a plugins[] entry into shell.json alongside the

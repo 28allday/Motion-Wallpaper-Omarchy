@@ -18,7 +18,7 @@ This repo is an Omarchy shell plugin, so Omarchy's own plugin command installs i
 omarchy plugin add https://github.com/28allday/Motion-Wallpaper-Omarchy.git --enable
 ```
 
-That clones it into `~/.config/omarchy/plugins/`, enables it, and puts the film icon in the right-hand bar section. Click the icon and pick a video — that is the whole install.
+That clones it into `~/.config/omarchy/plugins/`, enables it, and asks which bar section to put the film icon in — left, center or right (right is pre-selected). Click the icon and pick a video: that is the whole install.
 
 To also get the `motion-wallpaper` CLI (for keybinds and scripting), the Walker entry and the icon, run the installer script as well:
 
@@ -28,7 +28,9 @@ cd Motion-Wallpaper-Omarchy
 ./wallpaper.sh
 ```
 
-`wallpaper.sh` checks dependencies, installs the plugin via `omarchy plugin add` if it isn't already there, installs the CLI and icon, and restarts the shell. Later on, update with `omarchy plugin update nosignal.motion-wallpaper`.
+`wallpaper.sh` checks dependencies, installs the plugin via `omarchy plugin add` if it isn't already there (asking where to put the bar icon, same as above), installs the CLI and icon, and restarts the shell. Run non-interactively it takes the manifest's default section instead of asking. Later on, update with `omarchy plugin update nosignal.motion-wallpaper`.
+
+Already have the plugin and just want the CLI? Run `./wallpaper.sh` from the clone — it leaves an existing install alone.
 
 ## Requirements
 
