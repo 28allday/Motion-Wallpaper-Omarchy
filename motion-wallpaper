@@ -6,7 +6,7 @@
 # The interactive UI now lives in the shell itself: a bar widget + dropdown
 # panel (click the ◐/film icon in the bar). This CLI is the scriptable path —
 # for keybinds, SSH, and automation. It is a thin wrapper over the shell IPC:
-#   qs -p /usr/share/omarchy/shell ipc call motion-wallpaper <fn> [args]
+#   omarchy-shell motion-wallpaper <fn> [args]
 #
 # Commands:
 #   status  (default)  Print current state.
@@ -24,13 +24,14 @@
 set -euo pipefail
 
 APP_NAME="Motion Wallpaper"
-QS_SHELL="/usr/share/omarchy/shell"
+IPC_TARGET="motion-wallpaper"
 LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
 LOG_FILE="$LOG_DIR/motion-wallpaper.log"
 mkdir -p "$LOG_DIR"
 
 TXT_ERR_NO_SHELL="omarchy-shell (Quickshell) isn't running. Start your Omarchy session first."
-TXT_ERR_NO_PLUGIN="The motion-wallpaper plugin isn't loaded. Run the installer (wallpaper.sh)."
+TXT_ERR_NO_PLUGIN="The motion-wallpaper plugin isn't loaded. Enable it: omarchy plugin enable nosignal.motion-wallpaper"
+TXT_ERR_NO_OMARCHY="omarchy-shell was not found on PATH. Motion Wallpaper requires Omarchy 4+."
 
 err() { echo "motion-wallpaper: $*" >&2; }
 
@@ -39,15 +40,23 @@ require_cmd() {
   for c in "$@"; do command -v "$c" >/dev/null 2>&1 || { err "'$c' is not installed."; exit 1; }; done
 }
 
-shell_running() { pgrep -f "quickshell.*$QS_SHELL" >/dev/null 2>&1; }
-plugin_loaded() { qs -p "$QS_SHELL" ipc show 2>/dev/null | grep -qx "target motion-wallpaper"; }
+# All IPC goes through omarchy-shell rather than a raw `qs -p <path>`: it
+# resolves OMARCHY_PATH itself, recovers WAYLAND_DISPLAY for callers outside the
+# session (ssh, a TTY), and turns IPC-level failures into a nonzero exit.
+ipc() { omarchy-shell "$IPC_TARGET" "$@" 2>>"$LOG_FILE"; }
 
+# One read-only probe distinguishes "no shell" from "plugin not enabled" — the
+# wrapper reports the latter as "Target not found." on stderr.
 require_plugin() {
-  shell_running  || { err "$TXT_ERR_NO_SHELL";  exit 1; }
-  plugin_loaded  || { err "$TXT_ERR_NO_PLUGIN"; exit 1; }
+  command -v omarchy-shell >/dev/null 2>&1 || { err "$TXT_ERR_NO_OMARCHY"; exit 1; }
+  local probe
+  probe="$(omarchy-shell "$IPC_TARGET" status 2>&1 >/dev/null)" && return 0
+  case "$probe" in
+    *"Target not found"*|*"Function not found"*) err "$TXT_ERR_NO_PLUGIN" ;;
+    *) err "$TXT_ERR_NO_SHELL" ;;
+  esac
+  exit 1
 }
-
-ipc() { qs -p "$QS_SHELL" ipc call motion-wallpaper "$@" 2>>"$LOG_FILE"; }
 
 # Derive a single human state word from a status JSON payload on stdin.
 state_word() {

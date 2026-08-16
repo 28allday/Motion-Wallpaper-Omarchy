@@ -2,15 +2,18 @@
 # ==============================================================================
 # Motion Wallpaper installer for Omarchy 4 (Quickshell / omarchy-shell).
 #
-# Installs a native omarchy-shell service plugin that renders a looping, muted
-# video on the Wayland background layer, plus a thin CLI to control it.
+# The plugin itself is installed the supported way — `omarchy plugin add`, which
+# clones this repo into ~/.config/omarchy/plugins/ and registers it. This script
+# is a convenience wrapper around that plus the extras a plugin repo cannot
+# carry on its own:
 #
-# Installs:
-#   ~/.config/omarchy/plugins/nosignal.motion-wallpaper/   the QML service plugin
+#   ~/.config/omarchy/plugins/nosignal.motion-wallpaper/   the plugin (git clone)
 #   ~/.local/bin/motion-wallpaper                          CLI control
 #   ~/.local/share/applications/motion-wallpaper.desktop   app-menu entry
 #   ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg
-#   (enables the plugin id in ~/.config/omarchy/shell.json)
+#
+# If you only want the plugin, skip this script entirely:
+#   omarchy plugin add https://github.com/28allday/Motion-Wallpaper-Omarchy.git --enable
 #
 # Dependencies: qt6-multimedia (video decode), jq, python3, hyprland.
 # The shell plugin does the rendering, fullscreen auto-pause and state
@@ -21,12 +24,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ID="nosignal.motion-wallpaper"
-QS_SHELL="/usr/share/omarchy/shell"
-PLUGIN_SRC="$SCRIPT_DIR/plugin/$PLUGIN_ID"
 CLI_SRC="$SCRIPT_DIR/motion-wallpaper"
 ICON_SRC="$SCRIPT_DIR/icons/motion-wallpaper.svg"
-SHELL_JSON="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
 PLUGINS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins"
+PLUGIN_DIR="$PLUGINS_DIR/$PLUGIN_ID"
 
 echo "=== Motion Wallpaper installer (Omarchy 4 / Quickshell) ==="
 
@@ -36,17 +37,19 @@ if ! command -v pacman >/dev/null 2>&1; then
 fi
 
 # ----- sanity: this needs the Quickshell-based omarchy-shell -------------------
-if [ ! -d "$QS_SHELL" ] || ! command -v qs >/dev/null 2>&1; then
+# `omarchy plugin` and `omarchy-shell` both arrived with Omarchy 4; their absence
+# is the clearest signal that this is an older release.
+if ! command -v omarchy-shell >/dev/null 2>&1 || ! command -v omarchy-plugin-add >/dev/null 2>&1; then
   cat >&2 <<MSG
-ERROR: omarchy-shell (Quickshell) not found at $QS_SHELL.
+ERROR: omarchy-shell / omarchy-plugin-add not found on PATH.
 Motion Wallpaper requires Omarchy 4+.
 MSG
   exit 1
 fi
 
 # ----- required assets --------------------------------------------------------
-for f in "$PLUGIN_SRC/manifest.json" "$PLUGIN_SRC/Service.qml" \
-         "$PLUGIN_SRC/BarWidget.qml" "$PLUGIN_SRC/Panel.qml" "$CLI_SRC" "$ICON_SRC"; do
+for f in "$SCRIPT_DIR/manifest.json" "$SCRIPT_DIR/Service.qml" \
+         "$SCRIPT_DIR/BarWidget.qml" "$SCRIPT_DIR/Panel.qml" "$CLI_SRC" "$ICON_SRC"; do
   [ -f "$f" ] || { echo "Missing installer asset: $f" >&2; exit 1; }
 done
 
@@ -69,43 +72,74 @@ else
 fi
 
 # ----- install the plugin -----------------------------------------------------
-mkdir -p "$PLUGINS_DIR"
-DEST="$PLUGINS_DIR/$PLUGIN_ID"
-# If a previous install left a symlink (dev setup), replace it with a real copy.
-[ -L "$DEST" ] && rm -f "$DEST"
-rm -rf "$DEST"
-mkdir -p "$DEST"
-# Copy every plugin file — manifest plus all QML (service, bar widget, panel).
-install -m 644 "$PLUGIN_SRC"/*.json "$PLUGIN_SRC"/*.qml "$DEST"/
-echo "✓ Plugin installed to $DEST ($(find "$DEST" -type f | wc -l) files)"
-
-# ----- enable it in shell.json ------------------------------------------------
-# Add the plugin to .plugins[] (seeded disabled, no video, so first launch shows
-# the normal static wallpaper) AND add its bar widget to bar.layout.right so the
-# control panel is reachable from the bar. Both are added only if absent.
-if [ -f "$SHELL_JSON" ]; then
-  BACKUP="$SHELL_JSON.bak.$(date +%s)"
-  cp -f "$SHELL_JSON" "$BACKUP"
-  TMP="$(mktemp "${SHELL_JSON}.XXXXXX")"
-  if jq --arg id "$PLUGIN_ID" '
-      .plugins = (.plugins // []) |
-      (if any(.plugins[]; .id == $id) then .
-       else .plugins += [{ "id": $id, "output": "all", "pauseOnFullscreen": true, "enabled": false }]
-       end) |
-      .bar.layout.right = (.bar.layout.right // []) |
-      (if any(.bar.layout.right[]; .id == $id) then .
-       else .bar.layout.right += [{ "id": $id }]
-       end)' "$SHELL_JSON" > "$TMP"; then
-    mv -f "$TMP" "$SHELL_JSON"
-    echo "✓ Plugin + bar widget registered in shell.json (backup: $BACKUP)"
-  else
-    rm -f "$TMP"
-    echo "⚠️  Could not edit $SHELL_JSON automatically. Add to \"plugins\" and \"bar.layout.right\":" >&2
-    echo '     plugins[]:          { "id": "nosignal.motion-wallpaper", "output": "all", "pauseOnFullscreen": true, "enabled": false }' >&2
-    echo '     bar.layout.right[]: { "id": "nosignal.motion-wallpaper" }' >&2
+# Three cases: already running from inside the plugin directory (someone ran
+# `omarchy plugin add` first and is now just fetching the extras); a legacy
+# copy-install from an older version of this script; or a fresh install.
+install_plugin() {
+  if [ "$SCRIPT_DIR" = "$PLUGIN_DIR" ]; then
+    echo "✓ Running from the installed plugin — leaving it alone"
+    omarchy plugin enable "$PLUGIN_ID" >/dev/null 2>&1 || true
+    return
   fi
-else
-  echo "⚠️  $SHELL_JSON not found — is omarchy-shell configured? Skipping auto-enable." >&2
+
+  if [ -e "$PLUGIN_DIR" ] || [ -L "$PLUGIN_DIR" ]; then
+    if [ -d "$PLUGIN_DIR/.git" ]; then
+      echo "✓ Plugin already installed as a git checkout"
+      echo "  Update it with: omarchy plugin update $PLUGIN_ID"
+      return
+    fi
+    if [ -L "$PLUGIN_DIR" ]; then
+      echo "✓ Plugin is a dev symlink — leaving it alone"
+      return
+    fi
+    # A pre-0.2 copy install: no .git, so `omarchy plugin update` can never
+    # work on it. Replace it, but only once we are sure it is ours.
+    if [ -f "$PLUGIN_DIR/manifest.json" ] &&
+       [ "$(jq -r '.id // ""' "$PLUGIN_DIR/manifest.json")" = "$PLUGIN_ID" ]; then
+      echo "→ Replacing a legacy copy-install with a git checkout (so updates work)"
+      rm -rf "$PLUGIN_DIR"
+    else
+      echo "⚠️  $PLUGIN_DIR exists and is not this plugin — leaving it alone." >&2
+      return
+    fi
+  fi
+
+  # Clone from wherever this checkout came from, so `omarchy plugin update`
+  # has a real upstream to fast-forward against; fall back to this directory.
+  local url
+  url="$(git -C "$SCRIPT_DIR" remote get-url github 2>/dev/null \
+      || git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null \
+      || echo "$SCRIPT_DIR")"
+  echo "→ Adding the plugin from $url"
+  omarchy plugin add "$url" --enable --yes
+}
+install_plugin
+
+# ----- clean up after the old installer ---------------------------------------
+# Versions before 0.2 hand-wrote a plugins[] entry into shell.json alongside the
+# bar entry. `omarchy plugin enable` writes only the bar entry, which is enough
+# for both the widget and the service (PluginRegistry.isEnabled searches the bar
+# layout first), so a leftover duplicate just makes `omarchy plugin disable` take
+# two runs. A plugins[] entry carrying real settings is a deliberate config
+# choice and is left alone.
+SHELL_JSON="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+if [ -f "$SHELL_JSON" ] && command -v jq >/dev/null 2>&1; then
+  if jq -e --arg id "$PLUGIN_ID" '
+        (.plugins // []) | any(.;
+          .id == $id
+          and (.videoPath // "") == ""
+          and (.enabled // false) == false
+          and (.output // "all") == "all"
+          and (.pauseOnFullscreen // true) == true)' "$SHELL_JSON" >/dev/null 2>&1; then
+    TMP="$(mktemp "${SHELL_JSON}.XXXXXX")"
+    if jq --arg id "$PLUGIN_ID" '.plugins = ((.plugins // []) | map(select(.id != $id)))' \
+         "$SHELL_JSON" > "$TMP"; then
+      mv -f "$TMP" "$SHELL_JSON"
+      echo "✓ Removed the old hand-written plugins[] entry from shell.json"
+    else
+      rm -f "$TMP"
+    fi
+  fi
 fi
 
 # ----- install the CLI --------------------------------------------------------
@@ -144,13 +178,10 @@ fi
 
 # ----- load the plugin now ----------------------------------------------------
 echo
-if command -v omarchy-restart-shell >/dev/null 2>&1; then
-  echo "Restarting omarchy-shell to load the plugin…"
-  omarchy-restart-shell >/dev/null 2>&1 || true
-  echo "✓ Shell restarted"
-else
+echo "Restarting omarchy-shell to load the plugin…"
+omarchy-restart-shell >/dev/null 2>&1 || \
   echo "⚠️  Restart omarchy-shell manually to load the plugin (omarchy-restart-shell)."
-fi
+echo "✓ Shell restarted"
 
 # ----- done -------------------------------------------------------------------
 cat <<EOF
@@ -171,6 +202,9 @@ Tip: drop clips in ~/Videos/Wallpapers/ — they show up in the panel's list.
 
 Optional Hyprland keybind (SUPER+W is Close window in Omarchy — avoid it):
   bindd = SUPER ALT, W, Motion wallpaper, exec, motion-wallpaper toggle
+
+Updating later:  omarchy plugin update $PLUGIN_ID
+Removing:        omarchy plugin remove $PLUGIN_ID
 
 A playing wallpaper resumes automatically after reboot — no autostart step.
 Logs: ~/.cache/motion-wallpaper.log
