@@ -1,34 +1,37 @@
 # Dev notes — Motion Wallpaper (Omarchy 4)
 
-Working notes for picking the project back up. Last updated: 2026-07-31.
+Working notes for picking the project back up. Last updated: 2026-08-16.
 
 ## Status
 
-**PARKED 2026-07-31.** Omarchy 4 native plugin, working and installed on this
-box. Two commits landed today (`bd1d8f7` cross-fade, `eb48868` Omarchy 3
-cleanup), working tree clean.
+**PARKED, fully synced 2026-08-16.** Omarchy 4 native plugin, working and
+installed on this box. Working tree clean.
 
-⚠️ **Both remotes are behind — this is the main open item.**
+✅ **Dual push done 2026-08-16** — the long-standing open item is closed. All
+three refs sit at `d982192`, and `legacy-omarchy3` now exists on both remotes
+(Forgejo had no tags at all before).
 
 | Remote | state | tag |
 |---|---|---|
-| local `master` | `eb48868` | — |
-| `github` (28allday, canonical public) | **2 behind** | has `legacy-omarchy3` |
-| `origin` (Forgejo, nosignal) | **6 behind** | **missing `legacy-omarchy3`** |
+| local `master` | `d982192` | `legacy-omarchy3` |
+| `github` (28allday, canonical public) | `d982192` | ✅ |
+| `origin` (Forgejo, nosignal) | `d982192` | ✅ |
 
-Forgejo is still on `96a9b33`, i.e. the *pre-Omarchy-4 mpvpaper code* — the whole
-rewrite plus today's work is absent there. A dual push (plus pushing the tag to
-Forgejo) brings them into lockstep.
+Forgejo had been stuck on `96a9b33` — the *pre-Omarchy-4 mpvpaper code* — so that
+push carried the whole rewrite (8 commits) in one go.
+
+Also verified 2026-08-16: the installed copy at
+`~/.config/omarchy/plugins/nosignal.motion-wallpaper/` is byte-identical to
+`plugin/nosignal.motion-wallpaper/` (`diff -rq` clean), i.e. the live plugin has
+the cross-fade `Service.qml`. No drift despite the copy-install gotcha below.
 
 ### Pickup list
 
-1. **Dual push** — see table above. Offered and deferred repeatedly since
-   2026-07-20.
-2. `legacy-omarchy3` tag: **KEEP** — Gav's explicit call 2026-07-31. It marks the
+1. `legacy-omarchy3` tag: **KEEP** — Gav's explicit call 2026-07-31. It marks the
    last mpvpaper-era commit as a quiet archive. The README no longer advertises
    it, so it is an archive rather than a supported path. Do not delete it.
-3. Untested paths: multi-monitor (this box is single-output HDMI-A-1), and the
-   `output` selector beyond `"all"`.
+2. Untested paths: multi-monitor (this box is single-output HDMI-A-1), and the
+   `output` selector beyond `"all"`. Needs Gav + a second display.
 
 ## Gotchas that will bite you
 
@@ -127,7 +130,7 @@ Remotes: `origin` → `git.no-signal.uk/nosignal/Motion-Wallpaper-Omarchy`, `git
 
 **2026-07-31 — cross-fade fix + Omarchy 3 cleanup (commits `bd1d8f7`, `eb48868`; LOCAL ONLY, neither remote pushed).** Gav: changing clip "blinks back to the desktop". Cause: one `MediaPlayer` per surface, so assigning a new `source` cleared its `VideoOutput` while the new file opened and the static wallpaper showed through for a few hundred ms. Fix = **A/B double buffer** per monitor surface: incoming clip loads into the idle `VideoOutput`+`MediaPlayer` pair and plays there off-screen, and the back pair's **`videoSink` delivering its first frame** is the cue to cross over (220ms opacity fade); the outgoing player is then stopped and its source cleared, so steady state is still ONE decoder. Guards: bad incoming clip → abandon the swap and keep what's showing (never take the wallpaper down); 4s timeout crosses over if no frame and no error; re-picking the current clip cancels an in-flight swap. **Measured with a control** (sampler comparing a wallpaper-only screen strip against a static-wallpaper reference): old code closest approach **0.0 = pixel-exact match** (desktop fully exposed), new code 99.0 / 82.7 across two clip pairs (the dip is the cross-fade blend, never the wallpaper). Then stripped the Omarchy 3 archaeology — **real bug found: `wallpaper.sh`'s header listed `gum` as a dependency and called the CLI a "gum TUI/CLI"**, contradicting the dependency probe 20 lines below (installs jq/python/hyprland/qt6-multimedia, no gum); also dropped the "use the legacy mpvpaper release" error text, manifest's "replaces mpvpaper", and the socat-watcher comments. Tree now has ZERO mpvpaper/swaybg/socat/waybar/gum/TUI references. **`legacy-omarchy3` tag KEPT** — Gav's explicit call 2026-07-31 (quiet archive; README no longer advertises it).
 
-⚠️ **Push state (2026-07-31): `github` is 2 commits behind local, `origin`/forgejo is SIX behind and still has NO `legacy-omarchy3` tag** — forgejo holds only the pre-Omarchy-4 mpvpaper code. Dual push still pending/offered.
+~~⚠️ **Push state (2026-07-31): `github` is 2 commits behind local, `origin`/forgejo is SIX behind and still has NO `legacy-omarchy3` tag**~~ — **RESOLVED 2026-08-16 by the dual push; see Status at the top.**
 
 ⚠️ **Testing gotcha:** `hyprctl dispatch workspace N` does NOT work on Omarchy 4 (Lua now) — see [[omarchy-lua-bindings]]. To screenshot the wallpaper without switching workspaces, read `hyprctl -j clients` geometry and sample a gap strip (the bottom gap below tiled windows is full-width and pure wallpaper).
 
@@ -142,7 +145,7 @@ Remotes: `origin` → `git.no-signal.uk/nosignal/Motion-Wallpaper-Omarchy`, `git
 
 **Reload after QML edits = `omarchy-restart-shell`** (rescanPlugins does NOT reload edited code; never `omarchy-refresh-shell` — resets shell.json). DROPPED: mpvpaper, socat watcher, theme-watcher, systemd unit, gum TUI. **Legacy mpvpaper/swaybg version preserved on git tag `legacy-omarchy3`** (Omarchy ≤3), pushed to github. Old bash "Shape" notes below = legacy (those files removed from master, live only on the tag). See [[omarchy-quickshell-migration]], [[reference_omarchy_wallpaper]] (its swaybg claim is now ≤3 only).
 
-**Git state (end of 2026-07-20 session):** github 28allday master @ `71356e6` (4 commits: migration, panel+CLI, installer-copy-fix, README github-URL fix) + `legacy-omarchy3` tag pushed. ⚠️ `origin`/forgejo NOT pushed yet (user's usual dual-push still pending — offered, deferred). README clone URL now → github (canonical per [[feedback_github_canonical_links]]).
+**Git state (end of 2026-07-20 session):** github 28allday master @ `71356e6` (4 commits: migration, panel+CLI, installer-copy-fix, README github-URL fix) + `legacy-omarchy3` tag pushed. ~~⚠️ `origin`/forgejo NOT pushed yet~~ — **caught up 2026-08-16.** README clone URL now → github (canonical per [[feedback_github_canonical_links]]).
 
 **Non-bug noted:** the bar icon looking grey while I thought a video was playing was NOT a bug — the icon correctly reflects state (muted=stopped, accent=playing, amber=paused); it was grey because playback had been stopped. Verified via bar screenshots. Don't re-chase it.
 
