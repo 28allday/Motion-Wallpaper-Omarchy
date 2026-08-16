@@ -307,13 +307,13 @@ Item {
       readonly property bool shouldPlay: !root.manualPaused && !monFullscreen
 
       // ---- A/B double buffer ----
-      // Changing the clip used to blink the desktop: assigning a new source to
-      // a single MediaPlayer clears its VideoOutput while the new file opens,
-      // so the static wallpaper showed through for a few hundred ms. Now the
-      // incoming clip loads into whichever pair is idle and plays there
-      // off-screen, and we only cross over once it has actually delivered a
-      // video frame — something is on screen at every moment. The outgoing
-      // player is retired after the fade, so steady state is still one decoder.
+      // A single MediaPlayer per surface cannot change clips cleanly: assigning
+      // a new source clears its VideoOutput while the new file opens, blinking
+      // the static wallpaper through for a few hundred ms. So the incoming clip
+      // loads into whichever pair is idle and plays there off-screen, and we
+      // cross over only once it has actually delivered a video frame — leaving
+      // something on screen at every moment. The outgoing player is retired
+      // after the fade, so steady state is still one decoder.
       property bool frontIsA: true
       readonly property var frontPlayer: frontIsA ? playerA : playerB
       readonly property var backPlayer: frontIsA ? playerB : playerA

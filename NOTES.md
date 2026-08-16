@@ -1,209 +1,158 @@
-# Dev notes — Motion Wallpaper (Omarchy 4)
+# Implementation notes
 
-Working notes for picking the project back up. Last updated: 2026-08-16.
+How Motion Wallpaper is put together, and the non-obvious things worth knowing
+before changing it. For installing and using it, see the [README](README.md).
 
-## Status
+## Layout
 
-**Repackaged to Omarchy conventions 2026-08-16 (v0.2.0).** Omarchy 4 native
-plugin, working and installed on this box — now installed the supported way, as
-a git checkout via `omarchy plugin add`, verified end to end here. See
-"Packaging conventions" below for what changed and why.
+The repo root *is* the plugin — that is what Omarchy clones and validates.
 
-✅ **Dual push done 2026-08-16** — the long-standing open item is closed. All
-three refs sit at `d982192`, and `legacy-omarchy3` now exists on both remotes
-(Forgejo had no tags at all before).
+| Path | What it is |
+|---|---|
+| `manifest.json` | plugin manifest (`kinds`: `service`, `bar-widget`) |
+| `Service.qml` | the service: rendering, auto-pause, state, IPC target |
+| `BarWidget.qml` | bar icon; owns the dropdown's open state |
+| `Panel.qml` | the dropdown's contents, loaded by the widget |
+| `motion-wallpaper` | CLI, a thin client over the shell IPC target |
+| `wallpaper.sh` | installer for the CLI, icon and desktop entry |
+| `icons/` | the scalable app icon |
 
-| Remote | state | tag |
-|---|---|---|
-| local `master` | `d982192` | `legacy-omarchy3` |
-| `github` (28allday, canonical public) | `d982192` | ✅ |
-| `origin` (Forgejo, nosignal) | `d982192` | ✅ |
+## Architecture
 
-Forgejo had been stuck on `96a9b33` — the *pre-Omarchy-4 mpvpaper code* — so that
-push carried the whole rewrite (8 commits) in one go.
+The plugin renders one `PanelWindow` per targeted monitor on the Wayland
+background layer (namespace `omarchy-motion-background`), using QtMultimedia
+`MediaPlayer` + `VideoOutput`. It loads after the first-party static-wallpaper
+surface (`omarchy-background`), so it stacks above it. When no video is set, the
+file is missing, or the plugin is stopped, **no surface is created at all** — the
+static wallpaper simply shows through, which is why a broken state never leaves
+a black or frozen rectangle on the desktop.
 
-Also verified 2026-08-16: the installed copy at
-`~/.config/omarchy/plugins/nosignal.motion-wallpaper/` is byte-identical to
-`plugin/nosignal.motion-wallpaper/` (`diff -rq` clean), i.e. the live plugin has
-the cross-fade `Service.qml`. No drift despite the copy-install gotcha below.
+Auto-pause listens to Hyprland's event stream via `Quickshell.Hyprland` and, on
+any fullscreen-affecting event, reads per-monitor ground truth back from
+`hyprctl` rather than trusting the event payload — so it pauses on exactly the
+monitor whose visible workspace has a fullscreen window.
 
-### Pickup list
+### State model
 
-1. `legacy-omarchy3` tag: **KEEP** — Gav's explicit call 2026-07-31. It marks the
-   last mpvpaper-era commit as a quiet archive. The README no longer advertises
-   it, so it is an archive rather than a supported path. Do not delete it.
-2. Untested paths: multi-monitor (this box is single-output HDMI-A-1), and the
-   `output` selector beyond `"all"`. Needs Gav + a second display.
+Two sources, with a deliberate split:
 
-## Packaging conventions (2026-08-16, `b63d3d4` + follow-up)
+- an optional **`plugins[]` entry in `shell.json`** for this plugin id is the
+  config seed — `videoPath`, `enabled`, `output`, `pauseOnFullscreen`.
+  `Service.qml`'s `pluginConfig` falls back to `{}` when there is no entry, so
+  every setting has a working default and the plugin runs without one.
+- **`~/.local/state/motion-wallpaper/state.json`** is the runtime truth. IPC
+  mutations (play/stop/toggle, screen, auto-pause) write it, so they survive a
+  shell restart and a reboot. Editing the config entry re-seeds the state file.
 
-Audited against the real Omarchy source (`omarchy-plugin-add`,
-`omarchy-plugin-validate`, `shell/services/PluginRegistry.qml`) — the plugin
-*code* was already conventional, the packaging was not. What changed:
+That split is why there is no autostart step: `play` means it returns after a
+reboot, `stop` means it stays off.
 
-- **`manifest.json` now lives at the repo ROOT**, not under
-  `plugin/nosignal.motion-wallpaper/`. A plugin *is* a git repo with a root
-  manifest; `omarchy-plugin-add` clones the repo and runs `validate` on the
-  clone root. With the old layout `omarchy plugin add <this repo>` failed on
-  "missing manifest.json" — **the supported install path could never work.**
-  Check it with `omarchy plugin validate .` from the repo root.
-- **Install is now a git clone, not a copy.** `omarchy plugin update` is
-  `git fetch` + `merge --ff-only`, so a copy-installed plugin can never be
-  updated. `wallpaper.sh` detects a pre-0.2 copy-install (no `.git`, manifest id
-  matches) and replaces it.
-- **`barWidget.defaultSection: "right"`** added. Omitting it silently defaults
-  to **center** — this is the same manifest mistake that bit network-scan, and
-  it is not a bug in `omarchy plugin enable`.
-- **No more hand-editing `shell.json`.** The old installer wrote a `plugins[]`
-  entry *and* a `bar.layout.right` entry. Only one is needed:
-  `PluginRegistry.isEnabled()` → `findEntryLocation()` searches the bar layout
-  **before** `plugins[]`, so the bar entry alone enables both the widget and the
-  service. The duplicate's only effect was making `omarchy plugin disable` take
-  two runs. A `plugins[]` entry is still *supported* as an optional settings
-  seed — `Service.qml:pluginConfig` reads it and falls back to `{}` — it is just
-  no longer created automatically.
-- **The CLI goes through `omarchy-shell <target> <method>`**, not
-  `qs -p /usr/share/omarchy/shell ipc call`. The wrapper resolves
-  `$OMARCHY_PATH`, recovers `WAYLAND_DISPLAY` for callers outside the session
-  (ssh/TTY), applies a timeout, and turns "Target not found." into a nonzero
-  exit — which is what the CLI's not-loaded/not-running messages now key off.
+### Cross-fade on clip change
 
-**Known upstream race:** `omarchy plugin add --yes` enables through the running
-shell, whose registry may not have rescanned the just-cloned manifest yet — so
-`defaultSection` reads as unset and the widget lands in **center**. Reproduced
-on install here, then confirmed a later disable/enable puts it in `right`.
-`wallpaper.sh` re-places the widget once after an unattended install. The
-interactive path is unaffected: `omarchy-plugin-add` reads `defaultSection`
-straight off the cloned file for its `gum choose` prompt.
+A single `MediaPlayer` per surface cannot change clips cleanly: assigning a new
+`source` clears its `VideoOutput` while the new file opens, so for a few hundred
+milliseconds nothing paints the background layer and the desktop shows through.
 
-**Keep the placement prompt.** `wallpaper.sh` only passes `--yes` when there is
-no TTY. In a terminal the user gets Omarchy's own unsandboxed-code warning and
-the left/center/right chooser; their choice then wins over the re-place guard.
-
-## Gotchas that will bite you
-
-- **The installed plugin is a git checkout of this repo** (since 0.2.0), so it
-  does not track your working tree. Editing the repo does not change the running
-  plugin — for dev, symlink `~/.config/omarchy/plugins/nosignal.motion-wallpaper`
-  at this checkout instead (`wallpaper.sh` detects and preserves a symlink),
-  then `omarchy-restart-shell`. Note `omarchy plugin validate` **refuses
-  symlinks inside** a plugin folder, but a symlinked plugin *folder* is fine.
-- **Reload after QML edits = `omarchy-restart-shell`.** `rescanPlugins` does NOT
-  reload edited code. Never `omarchy-refresh-shell` — it resets shell.json.
-- **`hyprctl dispatch workspace N` does not work on Omarchy 4.** Dispatch is now a
-  Lua shorthand for `hl.dispatch(...)` and wants a dispatcher object under
-  `hl.dsp.*`; the plain form, and every quoted variant, fails. `hl.dsp.workspace`
-  is a table whose `.go` / `.switch` are nil — the working leaf call was never
-  pinned down. Don't burn time on it; see the screenshot trick below.
-- **PipeWire `spaVisitChoice` warning is benign and pre-existing.** It fires
-  whenever a `MediaPlayer` with an `AudioOutput` is created — verified zero
-  occurrences with motion stopped, one after a clip starts. The muted
-  `AudioOutput` is deliberate; leave it.
-
-## Cross-fade on clip change (2026-07-31, `bd1d8f7`)
-
-Gav: changing the clip "blinks back to the desktop". Cause was a single
-`MediaPlayer` per surface — assigning a new `source` clears its `VideoOutput`
-while the new file opens, so nothing painted the background layer for a few
-hundred ms and the static wallpaper showed through.
-
-Each monitor surface now carries an **A/B pair** of `VideoOutput` +
-`MediaPlayer`:
+So each monitor surface carries an **A/B pair** of `VideoOutput` + `MediaPlayer`:
 
 - the incoming clip loads into whichever pair is idle and **plays there
-  off-screen** (it must actually run to produce a frame);
-- the back pair's **`videoSink` first `videoFrameChanged`** is the cue to cross
-  over — a 220ms opacity fade, `frontIsA` flips;
+  off-screen** — it has to actually run to produce a frame;
+- the back pair's **`videoSink` delivering its first `videoFrameChanged`** is the
+  cue to cross over — a 220ms opacity fade, then `frontIsA` flips;
 - the outgoing player is stopped and its source cleared after the fade, so
   **steady state is still one active decoder**.
 
-The frame-arrival cue is the whole point: waiting on `mediaStatus` or a fixed
-delay would still race the decoder.
+The frame-arrival cue is the whole point. Waiting on `mediaStatus`, or on a fixed
+delay, still races the decoder.
 
-Guards worth keeping:
+Three guards are load-bearing:
 
 - a **bad incoming clip abandons the swap** and keeps whatever is showing — a
   broken file must never take the wallpaper down;
 - a **4s timeout** crosses over anyway if the new clip never delivers a frame
-  *and* never errors (otherwise a swap could hang forever);
-- **re-picking the clip already showing** cancels an in-flight swap rather than
-  stacking another one.
+  *and* never errors, so a swap cannot hang forever;
+- **re-picking the clip already showing** cancels an in-flight swap instead of
+  stacking a second one.
 
-### How it was verified (repeat this if you touch the swap)
+### Verifying the cross-fade
 
-Screenshot comparison, because "does it blink" is not answerable by reading QML:
+"Does it blink?" is not answerable by reading QML, so measure it. The method,
+if you touch the swap:
 
-1. `motion-wallpaper stop`, wait, capture a **wallpaper-only strip** as the
-   static reference. Get a strip from `hyprctl -j clients` geometry — with two
-   tiled windows the **bottom gap is full-width and pure wallpaper**
-   (`grim -g "0,1428 2560x12"` on this box). This avoids needing an empty
-   workspace, which the Lua dispatch gotcha above makes awkward.
-2. Play clip A, confirm the strip is far from the reference (got 122.2 mean
-   per-byte distance — if it is small, the clips are indistinguishable from the
-   wallpaper and the test proves nothing).
-3. Sample the strip in a tight `grim` loop (~30 samples/s) while issuing the
-   switch to clip B; report the **closest approach to the static reference**.
+1. `motion-wallpaper stop`, then capture a **wallpaper-only strip** as the static
+   reference. Read `hyprctl -j clients` geometry to find one: with tiled windows
+   the bottom gap is full-width and pure wallpaper, e.g.
+   `grim -g "0,<gap-y> <width>x12"`. This avoids needing an empty workspace.
+2. Play clip A and confirm the strip is *far* from the reference. If the distance
+   is small, the clip is indistinguishable from the wallpaper and the test proves
+   nothing.
+3. Sample the strip in a tight `grim` loop (~30/s) while switching to clip B, and
+   report the **closest approach** to the static reference.
 
-Results — **always run the old code as a control**, or you cannot tell a passing
-test from an insensitive one:
+**Always measure a single-player build as a control**, or you cannot tell a
+passing test from an insensitive one. A single-player build scores 0.0 — a
+pixel-exact match with the static wallpaper, i.e. the desktop fully exposed.
+The A/B build stays far from it throughout; the dip mid-swap is the two clips
+blending, never the wallpaper.
 
-| build | closest approach | meaning |
-|---|---|---|
-| single-player (old) | **0.0** | pixel-exact match — desktop fully exposed |
-| A/B (new), SMPTE→win98 | 99.0 | cross-fade blend of the two clips |
-| A/B (new), SMPTE→farewell | 82.7 | cross-fade blend |
+## Packaging
 
-## Omarchy 3 cleanup (2026-07-31, `eb48868`)
+The plugin follows Omarchy's third-party plugin conventions, and a few of them
+are easy to get wrong:
 
-No legacy *code* remained — the tree was already pure Omarchy 4 — but the shipped
-files still referenced the mpvpaper/swaybg/socat era, and one reference was an
-actual documentation bug:
+- **`manifest.json` must be at the repo root.** `omarchy plugin add` clones the
+  repo and validates the *clone root*. A plugin kept in a subdirectory validates
+  fine when you point at that subdirectory but cannot be installed the supported
+  way. Check with `omarchy plugin validate .` from the repo root.
+- **Installs are git clones**, so `omarchy plugin update` is `git fetch` +
+  `merge --ff-only`. Never install by copying files in: a copy can never be
+  updated. `wallpaper.sh` delegates to `omarchy plugin add` for this reason.
+- **`barWidget.defaultSection`** decides where the icon lands and which option is
+  pre-selected in the placement prompt. Omitting it silently means `center`.
+- **Do not hand-write a `plugins[]` entry to enable the plugin.**
+  `PluginRegistry.isEnabled()` → `findEntryLocation()` searches the bar layout
+  *before* `plugins[]`, so the bar entry written by `omarchy plugin enable`
+  already enables both the bar widget and the service. A duplicate only makes
+  `omarchy plugin disable` take two runs to clear. The `plugins[]` entry remains
+  the place for *settings*, which is a separate thing.
+- **The panel is not a `panel` kind.** It is a `Loader` inside the bar widget,
+  the same mechanism the first-party audio and bluetooth widgets use. The `panel`
+  kind is for independently summoned floating windows.
+- **The CLI talks to the shell through `omarchy-shell <target> <method>`**, never
+  a hardcoded `qs -p /usr/share/omarchy/shell ipc call`. The wrapper resolves
+  `$OMARCHY_PATH`, recovers `WAYLAND_DISPLAY` for callers outside the session
+  (ssh, a TTY), applies a timeout, and turns IPC-level failures into a nonzero
+  exit — which is what the CLI's "not running" vs "not loaded" messages key off.
 
-- **`wallpaper.sh`'s header listed `gum` as a dependency** and called the CLI a
-  "gum TUI/CLI", contradicting the dependency probe twenty lines below (which
-  installs jq/python/hyprland/qt6-multimedia and correctly notes the UI is
-  native). Anyone following the header would have installed a package this
-  project has not needed since the rewrite.
-- the "not found" error told Omarchy ≤3 users to fetch a legacy mpvpaper release;
-- `manifest.json` billed itself as replacing mpvpaper;
-- `Service.qml` and the README referenced the retired socat watcher.
+## Working on it
 
-Tree now greps clean for `mpvpaper|swaybg|socat|waybar|gum|TUI|omarchy 3`.
+- **The installed plugin is a git clone of this repo**, so it does not track your
+  working tree. For development, symlink
+  `~/.config/omarchy/plugins/nosignal.motion-wallpaper` at your checkout;
+  `wallpaper.sh` detects a symlink and leaves it alone. Note that
+  `omarchy plugin validate` refuses symlinks *inside* a plugin folder, but a
+  symlinked plugin *folder* is fine.
+- **Reload after a QML edit is `omarchy-restart-shell`.** `rescanPlugins` only
+  discovers plugins and manifest changes; it does not reload edited QML. Never
+  use `omarchy-refresh-shell` — it resets `shell.json`.
+- **`hyprctl dispatch workspace N` does not work on Omarchy 4.** Dispatch is a
+  Lua shorthand for `hl.dispatch(...)` and wants a dispatcher object under
+  `hl.dsp.*`; the plain form and every quoted variant fail. Use the screenshot
+  method above rather than switching workspaces to see the wallpaper.
+- **The PipeWire `spaVisitChoice` warning is benign.** It fires whenever a
+  `MediaPlayer` with an `AudioOutput` is created — zero occurrences with motion
+  stopped, one after a clip starts. The muted `AudioOutput` is deliberate.
+- **`omarchy plugin add --yes` can place the widget in the wrong section.** It
+  enables through the running shell, whose registry may not have rescanned the
+  freshly-cloned manifest yet, so `defaultSection` reads as unset and the widget
+  lands in `center`; a later disable/enable places it correctly. `wallpaper.sh`
+  re-places it once after an unattended install. The interactive path is
+  unaffected — the placement prompt reads the manifest file directly.
 
-## Imported from memory — 2026-08-02 (project_motion_wallpaper.md)
+## Known limitations
 
-Repo: `~/Projects/Motion-Wallpaper-Omarchy/`
-Remotes: `origin` → `git.no-signal.uk/nosignal/Motion-Wallpaper-Omarchy`, `github` → `github.com/28allday/Motion-Wallpaper-Omarchy` (push to both).
-
-**2026-07-31 — cross-fade fix + Omarchy 3 cleanup (commits `bd1d8f7`, `eb48868`; LOCAL ONLY, neither remote pushed).** Gav: changing clip "blinks back to the desktop". Cause: one `MediaPlayer` per surface, so assigning a new `source` cleared its `VideoOutput` while the new file opened and the static wallpaper showed through for a few hundred ms. Fix = **A/B double buffer** per monitor surface: incoming clip loads into the idle `VideoOutput`+`MediaPlayer` pair and plays there off-screen, and the back pair's **`videoSink` delivering its first frame** is the cue to cross over (220ms opacity fade); the outgoing player is then stopped and its source cleared, so steady state is still ONE decoder. Guards: bad incoming clip → abandon the swap and keep what's showing (never take the wallpaper down); 4s timeout crosses over if no frame and no error; re-picking the current clip cancels an in-flight swap. **Measured with a control** (sampler comparing a wallpaper-only screen strip against a static-wallpaper reference): old code closest approach **0.0 = pixel-exact match** (desktop fully exposed), new code 99.0 / 82.7 across two clip pairs (the dip is the cross-fade blend, never the wallpaper). Then stripped the Omarchy 3 archaeology — **real bug found: `wallpaper.sh`'s header listed `gum` as a dependency and called the CLI a "gum TUI/CLI"**, contradicting the dependency probe 20 lines below (installs jq/python/hyprland/qt6-multimedia, no gum); also dropped the "use the legacy mpvpaper release" error text, manifest's "replaces mpvpaper", and the socat-watcher comments. Tree now has ZERO mpvpaper/swaybg/socat/waybar/gum/TUI references. **`legacy-omarchy3` tag KEPT** — Gav's explicit call 2026-07-31 (quiet archive; README no longer advertises it).
-
-~~⚠️ **Push state (2026-07-31): `github` is 2 commits behind local, `origin`/forgejo is SIX behind and still has NO `legacy-omarchy3` tag**~~ — **RESOLVED 2026-08-16 by the dual push; see Status at the top.**
-
-⚠️ **Testing gotcha:** `hyprctl dispatch workspace N` does NOT work on Omarchy 4 (Lua now) — see [[omarchy-lua-bindings]]. To screenshot the wallpaper without switching workspaces, read `hyprctl -j clients` geometry and sample a gap strip (the bottom gap below tiled windows is full-width and pure wallpaper).
-
-**✅ 2026-07-20 — Rewritten as a native omarchy-shell QML plugin for Omarchy 4 (Option B, DONE; pushed to `github` 28allday master + `legacy-omarchy3` tag. NOT yet pushed to `origin`/forgejo).** Machine is Omarchy **4.0.0.alpha** (quickshell/omarchy-shell; Waybar+Mako+swaybg gone). Why the old tool died: (a) **swaybg uninstalled** — first-party wallpaper is now `/usr/share/omarchy/shell/plugins/background/Background.qml` (`PanelWindow` on `WlrLayer.Background`, ns `omarchy-background`); all `pkill swaybg` restore logic dead. (b) bg symlink moved `~/.config/omarchy/current/background` → **`~/.local/state/omarchy/current/background`** (theme colors.toml too → `~/.local/state/omarchy/current/theme/colors.toml`). (c) there's a `background` IPC target now.
-
-**What shipped:** third-party plugin **`nosignal.motion-wallpaper`** (repo `plugin/nosignal.motion-wallpaper/`). Installed by `wallpaper.sh` as a COPY into `~/.config/omarchy/plugins/` — as of 2026-07-20 this box runs the copy install (was a dev symlink during the build). ⚠️ Copy install means editing the repo does NOT hot-reload the live plugin; for further dev, re-symlink `~/.config/omarchy/plugins/nosignal.motion-wallpaper → repo` then `omarchy-restart-shell`, or just re-run `wallpaper.sh`. Files:
-- `Service.qml` — QtMultimedia MediaPlayer+VideoOutput on Background layer (ns `omarchy-motion-background`), one PanelWindow per targeted screen via `Variants{model:activeScreens}`, stacks above static bg (loads later). Native `Quickshell.Hyprland onRawEvent` + `hyprctl` per-monitor fullscreen auto-pause (no socat). State → `~/.local/state/motion-wallpaper/state.json` (videoPath, enabled, output, pauseOnFullscreen — all live/persisted). IPC target **`motion-wallpaper`**: play/stop/toggle/pause/resume/status/setOutput/setPauseOnFullscreen. setOutput is live (no restart).
-- `manifest.json` — kinds `["service","bar-widget"]`.
-- `BarWidget.qml` + `Panel.qml` — native bar widget (nf-md-video glyph, colour=state) + dropdown panel (play/pause/stop, screen dropdown, autopause toggle, video list from ~/Videos/Wallpapers & ~/Videos), mirrors the panels/audio+bluetooth pattern; reaches service via `bar.shell.serviceFor()`.
-- `motion-wallpaper` (CLI, `~/.local/bin`) — thin IPC wrapper (no gum): status/play/stop/toggle/pause/resume/screen/autopause.
-- `wallpaper.sh` — installs plugin + CLI + icon + .desktop(toggle); registers plugin in shell.json `plugins[]` AND bar widget in `bar.layout.right`; deps qt6-multimedia/jq/python/hyprland.
-
-**Reload after QML edits = `omarchy-restart-shell`** (rescanPlugins does NOT reload edited code; never `omarchy-refresh-shell` — resets shell.json). DROPPED: mpvpaper, socat watcher, theme-watcher, systemd unit, gum TUI. **Legacy mpvpaper/swaybg version preserved on git tag `legacy-omarchy3`** (Omarchy ≤3), pushed to github. Old bash "Shape" notes below = legacy (those files removed from master, live only on the tag). See [[omarchy-quickshell-migration]], [[reference_omarchy_wallpaper]] (its swaybg claim is now ≤3 only).
-
-**Git state (end of 2026-07-20 session):** github 28allday master @ `71356e6` (4 commits: migration, panel+CLI, installer-copy-fix, README github-URL fix) + `legacy-omarchy3` tag pushed. ~~⚠️ `origin`/forgejo NOT pushed yet~~ — **caught up 2026-08-16.** README clone URL now → github (canonical per [[feedback_github_canonical_links]]).
-
-**Non-bug noted:** the bar icon looking grey while I thought a video was playing was NOT a bug — the icon correctly reflects state (muted=stopped, accent=playing, amber=paused); it was grey because playback had been stopped. Verified via bar screenshots. Don't re-chase it.
-
-**Shape:**
-- `wallpaper.sh` — installer. Only invokes sudo/yay when packages are actually missing. Installs into `~/.local/bin`, `~/.local/share/{applications,icons/hicolor/scalable/apps}`, and `~/.config/systemd/user/`. Refreshes `elephant.service` so Walker picks up the new `.desktop`/icon without logout.
-- `motion-wallpaper-toggle` — main gum TUI. Actions: `toggle | start | stop | change | status`. Header shows running state + target + video + autostart state.
-- `motion-wallpaper-watcher` — external auto-pause. Subscribes to Hyprland `socket2`, pauses/resumes mpv via `--input-ipc-server` on `fullscreen>>1/0`. Exists because mpvpaper's `-p` is flaky on Hyprland 0.54.x.
-- `motion-wallpaper.service` — systemd user unit, `WantedBy=graphical-session.target`. TUI has first-run confirm + menu toggle; enable/disable via `systemctl --user enable|disable motion-wallpaper.service`.
-- State file `~/.config/motion-wallpaper/state` holds `LAST_VIDEO`, `LAST_TARGET`, `LAST_DIR`. Atomic tmp+mv write, parsed with `read` (not `source`) to avoid arbitrary code execution from video paths.
-
-**Deps:** mpv, jq, gum, socat, libnotify (repos); mpvpaper (AUR).
-**Log:** `~/.cache/motion-wallpaper.log`.
-
-**How to apply:** When touching this repo, keep in mind the Omarchy-specific wallpaper behaviour — see `reference_omarchy_wallpaper.md` for the non-obvious pieces (swaybg not hyprpaper, setsid+uwsm-app, elephant cache).
+- Multi-monitor targeting and the `output` selector beyond `"all"` are
+  implemented and applied live, but have only been exercised on a single-output
+  machine.
+- Decoding runs continuously on the GPU. Auto-pause covers fullscreen windows;
+  on battery, stopping or using a shorter, lower-bitrate clip is the bigger win.

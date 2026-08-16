@@ -28,9 +28,13 @@ cd Motion-Wallpaper-Omarchy
 ./wallpaper.sh
 ```
 
-`wallpaper.sh` checks dependencies, installs the plugin via `omarchy plugin add` if it isn't already there (asking where to put the bar icon, same as above), installs the CLI and icon, and restarts the shell. Run non-interactively it takes the manifest's default section instead of asking. Later on, update with `omarchy plugin update nosignal.motion-wallpaper`.
+`wallpaper.sh` checks dependencies, installs the plugin if it isn't already there (asking where to put the bar icon, same as above), installs the CLI and icon, and restarts the shell. If you already have the plugin, it leaves it alone and just adds the CLI.
 
-Already have the plugin and just want the CLI? Run `./wallpaper.sh` from the clone — it leaves an existing install alone.
+To update later:
+
+```bash
+omarchy plugin update nosignal.motion-wallpaper
+```
 
 ## Requirements
 
@@ -42,14 +46,21 @@ Already have the plugin and just want the CLI? Run `./wallpaper.sh` from the clo
 
 | Path | Purpose |
 |------|---------|
-| `~/.config/omarchy/plugins/nosignal.motion-wallpaper/` | the plugin, as a git checkout (service + bar widget + panel) |
+| `~/.config/omarchy/plugins/nosignal.motion-wallpaper/` | the plugin (service + bar widget + panel) |
 | `~/.local/bin/motion-wallpaper` | CLI control (keybinds / scripting) |
 | `~/.local/share/applications/motion-wallpaper.desktop` | Walker entry (toggles the wallpaper) |
 | `~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg` | icon |
 
-Enabling is left to `omarchy plugin enable`, which adds the bar widget to `bar.layout.right` in your `shell.json` — the installer does not hand-edit that file.
+In your `shell.json`, enabling adds a single bar-widget entry in the section you chose. Out of the box the plugin starts with no video selected, so your normal static wallpaper is what you see until you pick a clip.
 
-Optionally, you can add a `plugins[]` entry for this plugin id in `shell.json` to seed its settings (`videoPath`, `enabled`, `output`, `pauseOnFullscreen`); without one it starts with no video and the static wallpaper showing.
+### Setting defaults in `shell.json`
+
+Optional. Add an entry for this plugin id under `plugins[]` to choose what it starts with:
+
+```json
+{ "id": "nosignal.motion-wallpaper", "videoPath": "~/Videos/Wallpapers/clip.mp4",
+  "enabled": true, "output": "all", "pauseOnFullscreen": true }
+```
 
 ## Usage
 

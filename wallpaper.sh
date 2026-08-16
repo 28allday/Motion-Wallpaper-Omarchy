@@ -150,13 +150,13 @@ place_widget() {
 }
 place_widget
 
-# ----- clean up after the old installer ---------------------------------------
-# Versions before 0.2 hand-wrote a plugins[] entry into shell.json alongside the
-# bar entry. `omarchy plugin enable` writes only the bar entry, which is enough
-# for both the widget and the service (PluginRegistry.isEnabled searches the bar
-# layout first), so a leftover duplicate just makes `omarchy plugin disable` take
-# two runs. A plugins[] entry carrying real settings is a deliberate config
-# choice and is left alone.
+# ----- migrate an older install -----------------------------------------------
+# Earlier versions hand-wrote a plugins[] entry into shell.json alongside the bar
+# entry. Only the bar entry is needed — it enables both the widget and the
+# service, since PluginRegistry.isEnabled searches the bar layout first — and a
+# leftover duplicate makes `omarchy plugin disable` take two runs to clear. Drop
+# it only when it still holds the defaults we wrote: a plugins[] entry carrying
+# real settings is the user's config and is left alone.
 SHELL_JSON="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
 if [ -f "$SHELL_JSON" ] && command -v jq >/dev/null 2>&1; then
   if jq -e --arg id "$PLUGIN_ID" '
