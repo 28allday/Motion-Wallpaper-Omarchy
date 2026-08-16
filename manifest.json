@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "nosignal.motion-wallpaper",
   "name": "Motion Wallpaper",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Gavin Nugent",
   "license": "MIT",
-  "description": "Native looping video wallpaper for omarchy-shell. Renders a muted, looping video on the background layer above the static wallpaper, with per-monitor targeting and auto-pause on fullscreen. Controlled from its bar widget, or from a terminal with the motion-wallpaper CLI.",
+  "description": "Native looping video wallpaper for omarchy-shell. Renders a muted, looping video on the background layer above the static wallpaper, with a different clip per monitor if you want one, and auto-pause on fullscreen. Controlled from its bar widget, or from a terminal with the motion-wallpaper CLI.",
   "kinds": ["service", "bar-widget"],
   "entryPoints": {
     "service": "Service.qml",
@@ -25,12 +25,13 @@
     "defaults": {
       "videoPath": "",
       "output": "all",
+      "screenVideos": {},
       "pauseOnFullscreen": true,
       "enabled": true
     },
     "schema": [
-      { "key": "videoPath", "type": "path", "label": "Video file", "defaultValue": "" },
-      { "key": "output", "type": "string", "label": "Output (monitor connector name, or 'all')", "defaultValue": "all" },
+      { "key": "videoPath", "type": "path", "label": "Default video file", "defaultValue": "" },
+      { "key": "output", "type": "string", "label": "Output for the default video (monitor connector name, or 'all')", "defaultValue": "all" },
       { "key": "pauseOnFullscreen", "type": "boolean", "label": "Pause on fullscreen window", "defaultValue": true },
       { "key": "enabled", "type": "boolean", "label": "Enabled", "defaultValue": true }
     ]

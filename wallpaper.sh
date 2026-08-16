@@ -229,11 +229,15 @@ cat <<EOF
 Quick start:
   Click the film icon in the bar → pick a video from the panel.
   Or from a terminal:
-    motion-wallpaper play ~/Videos/Wallpapers/clip.mp4
+    motion-wallpaper play ~/Videos/clip.mp4
     motion-wallpaper status
     motion-wallpaper stop
 
-Tip: drop clips in ~/Videos/Wallpapers/ — they show up in the panel's list.
+Tip: drop clips in ~/Videos — they show up in the panel's list.
+
+Two monitors? Give each its own clip:
+  motion-wallpaper play ~/Videos/rain.mp4 DP-1
+  motion-wallpaper off HDMI-A-1      # that one keeps the static wallpaper
 
 Optional Hyprland keybind (SUPER+W is Close window in Omarchy — avoid it):
   bindd = SUPER ALT, W, Motion wallpaper, exec, motion-wallpaper toggle

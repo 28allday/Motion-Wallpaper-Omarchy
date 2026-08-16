@@ -1,14 +1,25 @@
 # Motion Wallpaper - Omarchy
 
-[![Video Title](https://img.youtube.com/vi/GpdS_jyW9kU/maxresdefault.jpg)](https://youtu.be/GpdS_jyW9kU)
-
 Animated video wallpapers for [Omarchy 4](https://omarchy.com) (Arch Linux + Hyprland + Quickshell).
 
-On Omarchy 4 the desktop shell is **omarchy-shell** (Quickshell/QML) and the wallpaper is painted by a QML plugin. Motion Wallpaper plugs straight into that model: a native **omarchy-shell plugin** renders a looping, muted video on the Wayland background layer, above the first-party static wallpaper, with native fullscreen auto-pause and persistent state. It ships a **bar widget + dropdown panel** (click the film icon in the bar) to play/pause/stop, pick a clip, choose the screen, and toggle auto-pause — all native, themed to match the rest of the shell. A thin `motion-wallpaper` CLI covers keybinds and scripting.
+![Two monitors, each running its own clip, with the control panel open](docs/two-screens.jpg)
 
-The shell plugin does the rendering, the controls, pausing and state itself — there is no external daemon, watcher, systemd unit or terminal UI.
+<sub>Two monitors, two different clips, panel open on the right. Clips from [moewalls.com](https://moewalls.com).</sub>
+
+Drop some clips in `~/Videos`, click the film icon in the bar, pick one. That's it.
+
+- **A different clip on every monitor** — or one everywhere, or video on some screens and your normal wallpaper on the rest
+- **Native panel in the bar** — play, pause, stop, pick a clip, all themed to match the rest of the shell
+- **Pauses itself** under fullscreen windows, so games and films don't pay for a wallpaper nobody can see
+- **Cross-fades** between clips — the desktop never flashes through mid-switch
+- **Comes back after a reboot**, with no autostart to set up
+- **`motion-wallpaper` CLI** for keybinds and scripting
+
+There's no daemon, watcher, systemd unit or terminal UI — it is one omarchy-shell plugin doing the rendering, the controls and the state.
 
 > **Omarchy 4+ only.** It needs the Quickshell-based `omarchy-shell`; the installer checks for it and stops if it is missing.
+
+[![Watch the demo](https://img.youtube.com/vi/GpdS_jyW9kU/maxresdefault.jpg)](https://youtu.be/GpdS_jyW9kU)
 
 ## Quick Start
 
@@ -58,19 +69,32 @@ In your `shell.json`, enabling adds a single bar-widget entry in the section you
 Optional. Add an entry for this plugin id under `plugins[]` to choose what it starts with:
 
 ```json
-{ "id": "nosignal.motion-wallpaper", "videoPath": "~/Videos/Wallpapers/clip.mp4",
+{ "id": "nosignal.motion-wallpaper", "videoPath": "~/Videos/clip.mp4",
   "enabled": true, "output": "all", "pauseOnFullscreen": true }
+```
+
+To start each monitor on its own clip, add `screenVideos`, keyed by connector
+name (`hyprctl monitors` lists them). An empty string keeps that screen on the
+static wallpaper, and any monitor you don't list falls back to `videoPath`:
+
+```json
+{ "id": "nosignal.motion-wallpaper",
+  "videoPath": "~/Videos/clip.mp4",
+  "screenVideos": { "DP-1": "~/Videos/rain.mp4", "DP-2": "" },
+  "enabled": true, "pauseOnFullscreen": true }
 ```
 
 ## Usage
 
 ### The bar widget + panel
 
+<img src="docs/panel.png" alt="The Motion Wallpaper panel" width="330" align="right">
+
 Click the **film icon** in the bar to open the control panel. From there you can:
 
 - **Play / Pause / Stop** the video
-- **Pick a clip** from a list of videos in `~/Videos/Wallpapers` and `~/Videos` — clips cross-fade into each other, so the desktop never flashes through mid-switch
-- **Choose the screen** — all monitors or a specific output (applies instantly)
+- **Pick a clip** from a list of the videos in `~/Videos` — clips cross-fade into each other, so the desktop never flashes through mid-switch
+- **Choose the screen** — the **SCREEN** dropdown (only shown when you have more than one monitor) aims everything below it: leave it on *All screens* to set every monitor at once, or pick a monitor to change just that one. Each option is labelled with the clip that screen is playing, so the dropdown doubles as the per-monitor readout.
 - **Toggle auto-pause** when a fullscreen window covers the wallpaper
 
 The bar icon reflects state at a glance: accent when playing, amber when paused, dim when stopped.
@@ -78,31 +102,54 @@ The bar icon reflects state at a glance: accent when playing, amber when paused,
 ### From the terminal
 
 ```bash
-motion-wallpaper                 # print current state (default)
-motion-wallpaper play ~/Videos/Wallpapers/clip.mp4
-motion-wallpaper stop            # stop; static wallpaper shows through
+motion-wallpaper                 # print current state, per monitor (default)
+motion-wallpaper screens         # what each monitor is showing
+motion-wallpaper play ~/Videos/clip.mp4          # every monitor
+motion-wallpaper play ~/Videos/rain.mp4 DP-1     # just that monitor
+motion-wallpaper off DP-2        # blank one screen; the others keep playing
+motion-wallpaper clear DP-1      # drop its own clip; follow the default again
+motion-wallpaper stop            # stop everywhere; static wallpaper shows through
 motion-wallpaper toggle          # flip on/off
 motion-wallpaper pause           # pause / resume
 motion-wallpaper resume
-motion-wallpaper screen HDMI-A-1 # or: screen all
 motion-wallpaper autopause off   # or: on
 ```
 
 ### With a keybind
 
-Add to `~/.config/hypr/bindings.conf` (or your Omarchy Lua bindings). Avoid `SUPER+W` — that's *Close window* in Omarchy:
+Omarchy 4 keeps user keybinds in `~/.config/hypr/bindings.lua`. Avoid `SUPER+W` — that's *Close window* in Omarchy:
 
-```
-bindd = SUPER ALT, W, Motion wallpaper, exec, motion-wallpaper toggle
+```lua
+-- flip the wallpaper on and off
+o.bind("SUPER + ALT + W", "Motion wallpaper", "motion-wallpaper toggle")
+
+-- or open the panel itself
+o.bind("SUPER + ALT + V", "Motion wallpaper panel",
+       "omarchy-shell shell toggle nosignal.motion-wallpaper")
 ```
 
 ### Video library folder
 
-Drop clips in **`~/Videos/Wallpapers/`** and they appear in the panel's list. To play a file from anywhere else, use `motion-wallpaper play <path>`.
+Drop clips in **`~/Videos`** and they appear in the panel's list (a `~/Videos/Wallpapers` subfolder is picked up too). To play a file from anywhere else, use `motion-wallpaper play <path>`.
 
 ### Multiple monitors
 
-The panel's **screen** dropdown (or `motion-wallpaper screen <name|all>`) targets a single output or all of them, applied live with no shell restart. The video plays only on the targeted monitor(s); the rest keep the normal static wallpaper.
+Every monitor is set independently, so you can run **a different clip on each screen**, the same clip on all of them, or video on some and the static wallpaper on the rest. It all applies live, with no shell restart.
+
+From the panel: pick a monitor in the **SCREEN** dropdown, then click a clip — only that screen changes. With a monitor picked, the video list grows an **Off — static wallpaper** row that blanks that one screen while the others keep playing. Switch back to *All screens* and clicking a clip sets every monitor at once (dropping the per-screen choices).
+
+Once your screens are set individually, the panel **opens aimed at the monitor it is on** rather than at *All screens* — so a stray click changes one screen instead of flattening the lot. The screen it is aimed at is named in the pill next to the title.
+
+The same thing from the terminal:
+
+```bash
+motion-wallpaper play ~/Videos/rain.mp4 DP-1
+motion-wallpaper play ~/Videos/city.mp4 HDMI-A-1
+motion-wallpaper off DP-2
+motion-wallpaper screens          # check what landed where
+```
+
+Connector names come from `hyprctl monitors`. A monitor keeps its clip while it is unplugged, so it comes back to the right one; a monitor you have never set follows the default `videoPath` (and the legacy `motion-wallpaper screen <name|all>` targeting, which only applies to monitors with no clip of their own).
 
 ### Persistence
 
@@ -110,10 +157,10 @@ A playing wallpaper **resumes automatically after a reboot** — the plugin pers
 
 ## How It Works
 
-- **Rendering** — the plugin creates one `PanelWindow` per targeted monitor on the Wayland **background layer** (namespace `omarchy-motion-background`), using QtMultimedia `MediaPlayer` + `VideoOutput` (looped, muted, `PreserveAspectCrop`). It loads after the first-party static-wallpaper surface, so it stacks above it. When no video is set or the file is missing, no surface is created at all — so the static wallpaper shows through (never a black or frozen frame).
+- **Rendering** — the plugin creates one `PanelWindow` per targeted monitor on the Wayland **background layer** (namespace `omarchy-motion-background`), using QtMultimedia `MediaPlayer` + `VideoOutput` (looped, muted, `PreserveAspectCrop`). Each surface resolves its own clip, which is what lets monitors differ. It loads after the first-party static-wallpaper surface, so it stacks above it. When a monitor has no video set or its file is missing, no surface is created there at all — so the static wallpaper shows through (never a black or frozen frame).
 - **Auto-pause on fullscreen** — the plugin listens to Hyprland's event stream (`Quickshell.Hyprland`) and, on any fullscreen-affecting event, reads per-monitor ground truth from `hyprctl` to pause the video on exactly the monitor whose visible workspace has a fullscreen window. Toggle it from the panel (or `motion-wallpaper autopause on|off`).
 - **Theme changes** — nothing to do: switch themes freely, the first-party static wallpaper updates underneath. The video keeps playing until you stop it.
-- **Controls** — the bar widget and panel talk to the plugin's service instance in-process. The `motion-wallpaper` CLI is a thin client over the same shell IPC target (`play` / `stop` / `toggle` / `pause` / `resume` / `status` / `setOutput` / `setPauseOnFullscreen`), reachable directly as `omarchy-shell motion-wallpaper <fn>`. State (video, enabled, screen, auto-pause) persists to `~/.local/state/motion-wallpaper/state.json`.
+- **Controls** — the bar widget and panel talk to the plugin's service instance in-process. The `motion-wallpaper` CLI is a thin client over the same shell IPC target (`play` / `playAll` / `playOn` / `clearScreen` / `stop` / `toggle` / `pause` / `resume` / `status` / `screens` / `setOutput` / `setPauseOnFullscreen`), reachable directly as `omarchy-shell motion-wallpaper <fn>`. State (per-screen clips, default video, enabled, auto-pause) persists to `~/.local/state/motion-wallpaper/state.json`.
 
 ## Supported Video Formats
 

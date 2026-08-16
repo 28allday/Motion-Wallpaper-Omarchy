@@ -16,11 +16,22 @@ import Quickshell.Hyprland
 // -----------
 //   * shell.json plugins[] entry (this plugin's id) is authoritative for the
 //     config-only options `output` and `pauseOnFullscreen`, and provides the
-//     INITIAL seed for `videoPath` + `enabled`.
+//     INITIAL seed for `videoPath` + `enabled` + `screenVideos`.
 //   * ~/.local/state/motion-wallpaper/state.json is the runtime truth for
 //     `videoPath` + `enabled`. IPC mutations (play/stop/toggle) write it, so
 //     they survive shell restarts. When the config's videoPath/enabled changes
 //     (e.g. edited in shell.json) the state file is re-seeded to match.
+//
+// Which clip plays where
+// ----------------------
+// Three layers, most specific first, resolved per monitor by pathForScreen():
+//   1. `screenVideos[<connector>]` — a per-monitor clip. An empty string means
+//      "this monitor stays static", which is how a single screen is blanked
+//      while others keep playing.
+//   2. `videoPath`, if `output` is "all" or names this monitor.
+//   3. nothing — no surface, static wallpaper shows through.
+// So different monitors can run different clips, and `output` remains the
+// coarse (legacy, CLI-facing) targeting switch for monitors with no override.
 Item {
   id: root
 
@@ -63,9 +74,15 @@ Item {
   property string output: "all"
   property bool pauseOnFullscreen: true
   property bool manualPaused: false   // set by IPC pause(); cleared by resume()/play()
+  // Per-monitor clips: { "HDMI-A-1": "/path/clip.mp4", "DP-2": "" }.
+  // A present key wins over videoPath/output for that monitor; "" means the
+  // monitor stays on the static wallpaper. Keys for disconnected monitors are
+  // kept, so a screen gets its clip back when it is plugged in again.
+  property var screenVideos: ({})
   property bool _stateLoaded: false
   property bool _stateHadOutput: false  // state.json carried an explicit output
   property bool _stateHadPause: false   // state.json carried an explicit pauseOnFullscreen
+  property bool _stateHadScreens: false // state.json carried an explicit screenVideos
 
   // Track the config seed so a shell.json edit re-seeds the state file.
   property string _seedSig: ""
@@ -84,38 +101,115 @@ Item {
     return "file://" + resolvePath(s).replace(/ /g, "%20")
   }
 
-  readonly property string effectiveVideoUrl: videoFileExists ? toFileUrl(videoPath) : ""
+  // ------------------------------------------------------- file existence
+  // Which of the configured clips actually exist on disk, keyed by RESOLVED
+  // path. Gating each surface on this means a missing file renders NO panel on
+  // that monitor, so the first-party static wallpaper shows through there
+  // (never a black or frozen frame). With per-monitor clips there can be
+  // several paths in play, so one process checks them all in a batch.
+  property var existingPaths: ({})
 
-  // Whether the configured video file actually exists on disk. Gating the
-  // surface on this means a missing/unset file renders NO panel at all, so the
-  // first-party static wallpaper shows through (never a black or frozen frame).
-  property bool videoFileExists: false
+  function pathExists(p) {
+    var r = resolvePath(p)
+    return r !== "" && root.existingPaths[r] === true
+  }
 
-  function checkVideoFile() {
-    var p = resolvePath(root.videoPath)
-    if (!p) { root.videoFileExists = false; return }
-    statProc.command = ["test", "-f", p]
+  // Every path the current state could render, resolved and deduplicated.
+  function candidatePaths() {
+    var seen = ({})
+    var out = []
+    function add(p) {
+      var r = resolvePath(p)
+      if (r === "" || seen[r]) return
+      seen[r] = true
+      out.push(r)
+    }
+    add(root.videoPath)
+    var sv = root.screenVideos || ({})
+    for (var k in sv) add(sv[k])
+    return out
+  }
+
+  function checkVideoFiles() {
+    var paths = candidatePaths()
+    if (paths.length === 0) { root.existingPaths = ({}); return }
+    if (statProc.running) { statDebounce.restart(); return }
+    statProc.command = ["bash", "-c",
+      'for p in "$@"; do [ -f "$p" ] && printf "%s\\n" "$p"; done', "_"].concat(paths)
     statProc.running = true
   }
 
-  onVideoPathChanged: checkVideoFile()
+  onVideoPathChanged: checkVideoFiles()
+  onScreenVideosChanged: checkVideoFiles()
 
   Process {
     id: statProc
-    onExited: function(code) { root.videoFileExists = (code === 0) }
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var set = ({})
+        var lines = String(text || "").split("\n")
+        for (var i = 0; i < lines.length; i++) {
+          var p = lines[i].trim()
+          if (p) set[p] = true
+        }
+        root.existingPaths = set
+      }
+    }
   }
 
-  // Screens we actually render a video surface on.
+  Timer {
+    id: statDebounce
+    interval: 80
+    repeat: false
+    onTriggered: root.checkVideoFiles()
+  }
+
+  // Kept for the panel, the bar icon and the CLI: does the DEFAULT clip exist.
+  readonly property bool videoFileExists: pathExists(videoPath)
+
+  // --------------------------------------------------------- clip resolution
+  // The clip CONFIGURED for a monitor — its own override if it has one,
+  // otherwise the default clip when `output` targets it. "" means nothing.
+  // Ignores `enabled`, so the panel can show the assignment while stopped.
+  function configuredPathForScreen(name) {
+    var n = String(name)
+    var sv = root.screenVideos || ({})
+    if (Object.prototype.hasOwnProperty.call(sv, n)) return String(sv[n] || "")
+    if (root.output === "all" || root.output === n) return String(root.videoPath || "")
+    return ""
+  }
+
+  // The clip a monitor should show right now. "" means no surface.
+  function pathForScreen(name) {
+    return root.enabled ? root.configuredPathForScreen(name) : ""
+  }
+
+  // Same, as a playable url — empty unless the file is actually there.
+  function urlForScreen(name) {
+    var p = pathForScreen(name)
+    if (p === "" || !pathExists(p)) return ""
+    return toFileUrl(p)
+  }
+
+  // Screens we actually render a video surface on. Rebuilt whenever any input
+  // changes, but always out of the SAME screen objects, so Variants only
+  // creates/destroys surfaces that genuinely appeared or went away — a clip
+  // change leaves the surface alone and is handled by its cross-fade.
   property var activeScreens: {
-    if (!enabled || !videoPath || !videoFileExists) return []
     var out = []
+    if (!enabled) return out
     var screens = Quickshell.screens
     for (var i = 0; i < screens.length; i++) {
       var s = screens[i]
-      if (root.output === "all" || String(s.name) === root.output) out.push(s)
+      if (root.urlForScreen(String(s.name)) !== "") out.push(s)
     }
     return out
   }
+
+  // Is anything actually on screen right now? With per-monitor clips this is
+  // no longer "enabled && the default file exists" — every monitor can have
+  // been blanked individually — so the bar icon keys off this.
+  readonly property bool rendering: activeScreens.length > 0
 
   // ------------------------------------------------------- persistence
   function persistState() {
@@ -123,9 +217,25 @@ Item {
       videoPath: root.videoPath,
       enabled: root.enabled,
       output: root.output,
-      pauseOnFullscreen: root.pauseOnFullscreen
+      pauseOnFullscreen: root.pauseOnFullscreen,
+      screenVideos: root.screenVideos || ({})
     }, null, 2) + "\n"
     stateFile.setText(payload)
+  }
+
+  // Accept only a flat { connector: path } object of strings — anything else in
+  // the file or the config entry is ignored rather than allowed to poison the
+  // render rule.
+  function normalizeScreenVideos(v) {
+    var out = ({})
+    if (!v || typeof v !== "object" || Array.isArray(v)) return out
+    for (var k in v) {
+      var name = String(k).trim()
+      if (name === "") continue
+      var p = v[k]
+      out[name] = (p === null || p === undefined) ? "" : String(p)
+    }
+    return out
   }
 
   function applyStateText(txt) {
@@ -143,6 +253,10 @@ Item {
         if (o.pauseOnFullscreen !== undefined) {
           root.pauseOnFullscreen = (o.pauseOnFullscreen === true || String(o.pauseOnFullscreen) === "true")
           root._stateHadPause = true
+        }
+        if (o.screenVideos !== undefined) {
+          root.screenVideos = root.normalizeScreenVideos(o.screenVideos)
+          root._stateHadScreens = true
         }
         return true
       }
@@ -162,7 +276,8 @@ Item {
     var en = cfg("enabled", true) === true || String(cfg("enabled", "true")) === "true"
     var op = String(cfg("output", "all") || "all") || "all"
     var pf = cfg("pauseOnFullscreen", true) === true || String(cfg("pauseOnFullscreen", "true")) === "true"
-    var sig = JSON.stringify([vp, en, op, pf])
+    var sv = normalizeScreenVideos(cfg("screenVideos", null))
+    var sig = JSON.stringify([vp, en, op, pf, sv])
     if (!root._stateLoaded) return           // wait until state file has loaded
     if (root._seedSig === "") {               // first sync after load
       root._seedSig = sig
@@ -172,6 +287,7 @@ Item {
       }
       if (!root._stateHadOutput) root.output = op            // no persisted output -> seed
       if (!root._stateHadPause) root.pauseOnFullscreen = pf  // no persisted flag -> seed
+      if (!root._stateHadScreens) root.screenVideos = sv     // no persisted map -> seed
       persistState()
       return
     }
@@ -181,6 +297,7 @@ Item {
       root.enabled = en
       root.output = op
       root.pauseOnFullscreen = pf
+      root.screenVideos = sv
       persistState()
     }
   }
@@ -456,7 +573,8 @@ Item {
         }
       }
 
-      readonly property string wantUrl: root.effectiveVideoUrl
+      // This monitor's own clip — a per-screen override, or the default one.
+      readonly property string wantUrl: root.urlForScreen(monName)
       onWantUrlChanged: requestUrl(wantUrl)
       onShouldPlayChanged: sync()
       Component.onCompleted: requestUrl(wantUrl)
@@ -470,6 +588,8 @@ Item {
       videoPath: root.videoPath,
       videoFileExists: root.videoFileExists,
       output: root.output,
+      screenVideos: root.screenVideos || ({}),
+      screens: root.screensObject(),
       pauseOnFullscreen: root.pauseOnFullscreen,
       manualPaused: root.manualPaused,
       activeScreens: (function () {
@@ -479,6 +599,30 @@ Item {
       })(),
       fullscreenMonitors: Object.keys(root.fullscreenMonitors)
     }
+  }
+
+  // One entry per connected monitor: what it is showing and why. This is what
+  // makes a per-screen setup inspectable from the CLI.
+  function screensObject() {
+    var out = []
+    var sv = root.screenVideos || ({})
+    var screens = Quickshell.screens
+    for (var i = 0; i < screens.length; i++) {
+      var n = String(screens[i].name)
+      var own = Object.prototype.hasOwnProperty.call(sv, n)
+      var p = root.pathForScreen(n)
+      out.push({
+        name: n,
+        video: p,
+        source: own ? "screen" : (p === "" ? "none" : "default"),
+        fileExists: p !== "" && root.pathExists(p),
+        paused: root.manualPaused
+                || (root.pauseOnFullscreen && root.fullscreenMonitors[n] === true),
+        playing: root.urlForScreen(n) !== "" && !root.manualPaused
+                 && !(root.pauseOnFullscreen && root.fullscreenMonitors[n] === true)
+      })
+    }
+    return out
   }
 
   // Root-level mutators are the single source of truth. The IpcHandler below
@@ -514,8 +658,59 @@ Item {
   function applyPause() { root.manualPaused = true }
   function applyResume() { root.manualPaused = false }
 
-  // Live monitor targeting. Persists and re-evaluates activeScreens, so the
-  // video surfaces move/appear/disappear with NO shell restart.
+  // Play `path` on every monitor: sets the default clip, drops every
+  // per-monitor override and un-targets, so "all screens" really means all of
+  // them. This is what the panel's "All screens" scope calls; the plain
+  // applyPlay() above leaves overrides and `output` alone.
+  function applyPlayAll(path) {
+    var p = String(path || "").trim()
+    if (p) root.videoPath = p
+    root.screenVideos = ({})
+    root.output = "all"
+    root.enabled = true
+    root.manualPaused = false
+    root.persistState()
+    return root.statusObject()
+  }
+
+  // Play `path` on ONE monitor, leaving the others as they are. An empty path
+  // blanks that monitor (its static wallpaper shows through) without touching
+  // global enabled — that is how you keep video on the other screens.
+  function applySetScreenVideo(name, path) {
+    var n = String(name || "").trim()
+    if (n === "" || n === "all") return root.applyPlayAll(path)
+    var p = String(path || "").trim()
+    var m = ({})
+    var sv = root.screenVideos || ({})
+    for (var k in sv) m[k] = sv[k]
+    m[n] = p
+    root.screenVideos = m
+    if (p !== "") {                 // assigning a clip implies "play it"
+      root.enabled = true
+      root.manualPaused = false
+    }
+    root.persistState()
+    return root.statusObject()
+  }
+
+  // Drop a monitor's override so it follows the default clip again.
+  function applyClearScreenVideo(name) {
+    var n = String(name || "").trim()
+    if (n === "" || n === "all") {
+      root.screenVideos = ({})
+    } else {
+      var m = ({})
+      var sv = root.screenVideos || ({})
+      for (var k in sv) if (k !== n) m[k] = sv[k]
+      root.screenVideos = m
+    }
+    root.persistState()
+    return root.statusObject()
+  }
+
+  // Live monitor targeting for monitors with no override of their own.
+  // Persists and re-evaluates activeScreens, so the video surfaces
+  // move/appear/disappear with NO shell restart.
   function applySetOutput(name) {
     var n = String(name || "all").trim()
     root.output = n === "" ? "all" : n
@@ -553,6 +748,28 @@ Item {
     function resume(): string {
       root.applyResume()
       return "playing"
+    }
+
+    // Play a clip on every monitor, clearing per-monitor overrides.
+    function playAll(path: string): string {
+      return JSON.stringify(root.applyPlayAll(path))
+    }
+
+    // Play a clip on ONE monitor: playOn("HDMI-A-1", "/path/clip.mp4").
+    // An empty path blanks that monitor and leaves the others playing.
+    function playOn(screen: string, path: string): string {
+      return JSON.stringify(root.applySetScreenVideo(screen, path))
+    }
+
+    // Drop a monitor's own clip so it follows the default again ("all" clears
+    // every override).
+    function clearScreen(screen: string): string {
+      return JSON.stringify(root.applyClearScreenVideo(screen))
+    }
+
+    // Per-monitor readout: what each connected screen is showing, and why.
+    function screens(): string {
+      return JSON.stringify(root.screensObject())
     }
 
     // Set targeted monitor: "all" or a connector name (e.g. "HDMI-A-1").

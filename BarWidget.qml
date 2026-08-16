@@ -30,8 +30,10 @@ BarWidget {
   function toggle() { opened = !opened }
 
   // ---- state readout (service-first) -------------------------------------
-  readonly property bool hasVideo: !!service && service.enabled
-                                   && service.videoFileExists && service.videoPath !== ""
+  // `rendering` rather than "the default clip exists": with per-monitor clips
+  // the wallpaper can be running off an override while videoPath is unset, or
+  // every monitor can have been blanked individually.
+  readonly property bool hasVideo: !!service && service.enabled && service.rendering === true
   readonly property bool isPaused: hasVideo && service.manualPaused === true
   readonly property color warningColor: "#e5c07b"
   readonly property color iconColor: !service ? Color.muted
@@ -40,20 +42,41 @@ BarWidget {
 
   readonly property string glyph: "󰕧"  // nf-md-video
 
+  // The monitor this bar instance lives on — the bar mounts one widget per
+  // screen, so this is how the panel knows which screen the user is looking at.
+  readonly property string screenName: {
+    var w = button.QsWindow ? button.QsWindow.window : null
+    return w && w.screen ? String(w.screen.name || "") : ""
+  }
+
   // ---- control helpers (direct service call, IPC fallback) ---------------
   function playPath(p) {
     if (service) service.applyPlay(p)
     else ipc("play", p)
   }
+  // Play on every monitor, dropping per-monitor clips.
+  function playAll(p) {
+    if (service) service.applyPlayAll(p)
+    else ipc("playAll", p)
+  }
+  // Play on one monitor only; an empty path blanks that monitor.
+  function playPathOn(screen, p) {
+    if (service) service.applySetScreenVideo(screen, p)
+    else ipc("playOn", screen, p)
+  }
+  function offScreen(screen) {
+    if (service) service.applySetScreenVideo(screen, "")
+    else ipc("playOn", screen, "")
+  }
   function togglePlayPause() {
-    if (!service) { ipc("toggle", ""); return }
+    if (!service) { ipc("toggle"); return }
     if (!service.enabled) { service.applyPlay(""); return }
     if (service.manualPaused) service.applyResume()
     else service.applyPause()
   }
   function stopPlayback() {
     if (service) service.applyStop()
-    else ipc("stop", "")
+    else ipc("stop")
   }
   function setOutput(name) {
     if (service) service.applySetOutput(name)
@@ -63,10 +86,16 @@ BarWidget {
     if (service) service.applySetPauseOnFullscreen(on ? "true" : "false")
     else ipc("setPauseOnFullscreen", on ? "true" : "false")
   }
-  function ipc(fn, arg) {
+  // Fallback path only (no reachable service instance). Every argument passed
+  // is forwarded verbatim, empty strings included — "blank this screen" is
+  // playOn(<name>, "").
+  function ipc(fn) {
     var cfgPath = (Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy") + "/shell"
     var cmd = ["qs", "-p", cfgPath, "ipc", "call", "motion-wallpaper", fn]
-    if (arg !== undefined && arg !== null && String(arg) !== "") cmd.push(String(arg))
+    for (var i = 1; i < arguments.length; i++) {
+      var a = arguments[i]
+      cmd.push(a === undefined || a === null ? "" : String(a))
+    }
     Quickshell.execDetached(cmd)
   }
 

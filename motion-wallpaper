@@ -9,13 +9,17 @@
 #   omarchy-shell motion-wallpaper <fn> [args]
 #
 # Commands:
-#   status  (default)  Print current state.
-#   play <file>        Set + start a video (enables + persists).
-#   stop               Stop; the static wallpaper shows through.
-#   toggle             Flip on/off (handy for a keybind).
-#   pause | resume     Pause/resume without tearing the surface down.
-#   screen <name|all>  Play on a specific output, or all of them.
-#   autopause <on|off> Pause the video when a fullscreen window covers it.
+#   status  (default)     Print current state (per monitor).
+#   play <file> [screen]  Set + start a video, everywhere or on one monitor.
+#   off <screen>          Blank one monitor, leaving the others playing.
+#   screens               List each monitor and the clip it is showing.
+#   stop                  Stop; the static wallpaper shows through.
+#   toggle                Flip on/off (handy for a keybind).
+#   pause | resume        Pause/resume without tearing the surface down.
+#   screen <name|all>     Coarse targeting for monitors with no clip of
+#                         their own (per-monitor clips override it).
+#   clear <screen|all>    Drop a monitor's own clip; it follows the default.
+#   autopause <on|off>    Pause the video when a fullscreen window covers it.
 #
 # State (owned by the plugin): ~/.local/state/motion-wallpaper/state.json
 # Log: ~/.cache/motion-wallpaper.log
@@ -58,42 +62,111 @@ require_plugin() {
   exit 1
 }
 
-# Derive a single human state word from a status JSON payload on stdin.
+# Derive a single human state word from a status JSON payload on stdin. Reads
+# the per-monitor array when there is one, so a setup whose clips are all
+# per-monitor (empty top-level videoPath) still reports "playing".
 state_word() {
-  local j enabled paused exists video
+  local j enabled paused exists video nscreens assigned playing missing
   j="$(cat)"
   enabled="$(jq -r '.enabled // false' <<<"$j")"
   paused="$(jq -r '.manualPaused // false' <<<"$j")"
+  if [ "$enabled" != "true" ]; then echo stopped; return; fi
+  if [ "$paused" = "true" ]; then echo paused; return; fi
+
+  nscreens="$(jq -r '(.screens // []) | length' <<<"$j")"
+  if [ "${nscreens:-0}" -gt 0 ]; then
+    assigned="$(jq -r '[(.screens // [])[] | select((.video // "") != "")] | length' <<<"$j")"
+    playing="$(jq -r '[(.screens // [])[] | select(.playing == true)] | length' <<<"$j")"
+    missing="$(jq -r '[(.screens // [])[] | select((.video // "") != "" and (.fileExists // false) != true)] | length' <<<"$j")"
+    if [ "$assigned" -eq 0 ]; then echo "no video set"; return; fi
+    if [ "$playing" -gt 0 ]; then echo playing; return; fi
+    if [ "$missing" -eq "$assigned" ]; then echo "file missing"; return; fi
+    echo paused; return    # assigned everywhere, but auto-paused by fullscreen
+  fi
+
   exists="$(jq -r '.videoFileExists // false' <<<"$j")"
   video="$(jq -r '.videoPath // ""' <<<"$j")"
-  if [ "$enabled" != "true" ]; then echo stopped; return; fi
   if [ -z "$video" ]; then echo "no video set"; return; fi
   if [ "$exists" != "true" ]; then echo "file missing"; return; fi
-  if [ "$paused" = "true" ]; then echo paused; return; fi
   echo playing
+}
+
+# Per-monitor breakdown: one line per connected output. Printed whenever there
+# is more than one monitor, or a monitor has been given a clip of its own —
+# with per-monitor clips, a single "video:" line no longer tells the story.
+screens_table() {
+  jq -r '(.screens // [])[] |
+    (.name)
+    + "\t"
+    + (if (.video // "") == "" then "off"
+       elif (.fileExists // false) | not then "file missing"
+       elif (.playing // false) then "playing"
+       else "paused" end)
+    + "\t"
+    + (if (.video // "") == "" then "-" else (.video | split("/") | last) end)
+    + (if (.source // "") == "screen" then "" else "  (default)" end)'
 }
 
 cmd_status() {
   require_cmd jq
   require_plugin
   local j; j="$(ipc status 2>/dev/null || echo '{}')"
-  local video output pause
+  local video output pause nscreens noverrides
   video="$(jq -r '.videoPath // ""' <<<"$j")"
   output="$(jq -r '.output // "all"' <<<"$j")"
   pause="$(jq -r '.pauseOnFullscreen // false' <<<"$j")"
+  nscreens="$(jq -r '(.screens // []) | length' <<<"$j")"
+  noverrides="$(jq -r '(.screenVideos // {}) | length' <<<"$j")"
   [ "$output" = "all" ] && output="all screens"
   printf 'status:     %s\n' "$(state_word <<<"$j")"
   printf 'video:      %s\n' "${video:-(none)}"
   printf 'screen:     %s\n' "$output"
   printf 'auto-pause: %s\n' "$([ "$pause" = "true" ] && echo on || echo off)"
+  if [ "${nscreens:-0}" -gt 1 ] || [ "${noverrides:-0}" -gt 0 ]; then
+    printf 'screens:\n'
+    screens_table <<<"$j" | while IFS=$'\t' read -r name state clip; do
+      printf '  %-12s %-12s %s\n' "$name" "$state" "$clip"
+    done
+  fi
 }
 
+cmd_screens() {
+  require_cmd jq
+  require_plugin
+  local j; j="$(ipc status 2>/dev/null || echo '{}')"
+  screens_table <<<"$j" | while IFS=$'\t' read -r name state clip; do
+    printf '%-12s %-12s %s\n' "$name" "$state" "$clip"
+  done
+}
+
+# play <file> [screen] — no screen means every monitor (and drops any
+# per-monitor clips); with a screen, only that monitor changes.
 cmd_play() {
   require_plugin
-  local f="${1:-}"
-  [ -n "$f" ] || { err "usage: motion-wallpaper play <file>"; exit 1; }
+  local f="${1:-}" s="${2:-}"
+  [ -n "$f" ] || { err "usage: motion-wallpaper play <file> [screen]"; exit 1; }
   [ -f "$f" ] || { err "file not found: $f"; exit 1; }
-  ipc play "$(readlink -f "$f")" >/dev/null
+  local p; p="$(readlink -f "$f")"
+  if [ -n "$s" ] && [ "$s" != "all" ]; then
+    ipc playOn "$s" "$p" >/dev/null
+  else
+    ipc playAll "$p" >/dev/null
+  fi
+}
+
+cmd_off() {
+  require_plugin
+  local s="${1:-}"
+  [ -n "$s" ] || { err "usage: motion-wallpaper off <monitor-name>"; exit 1; }
+  [ "$s" != "all" ] || { err "use 'motion-wallpaper stop' to blank every screen"; exit 1; }
+  ipc playOn "$s" "" >/dev/null
+}
+
+cmd_clear() {
+  require_plugin
+  local s="${1:-}"
+  [ -n "$s" ] || { err "usage: motion-wallpaper clear <monitor-name|all>"; exit 1; }
+  ipc clearScreen "$s" >/dev/null
 }
 
 cmd_screen() {
@@ -114,7 +187,10 @@ cmd_autopause() {
 
 case "${1:-status}" in
   status|"") cmd_status ;;
-  play)      shift; cmd_play "${1:-}" ;;
+  screens)   cmd_screens ;;
+  play)      shift; cmd_play "${1:-}" "${2:-}" ;;
+  off)       shift; cmd_off "${1:-}" ;;
+  clear)     shift; cmd_clear "${1:-}" ;;
   stop)      require_plugin; ipc stop   >/dev/null ;;
   toggle)    require_plugin; ipc toggle >/dev/null ;;
   pause)     require_plugin; ipc pause  >/dev/null ;;
@@ -127,13 +203,21 @@ $APP_NAME — control the omarchy-shell video wallpaper plugin.
 The interactive UI is the bar widget + panel (click the film icon in the bar).
 
 Usage: ${0##*/} [command]
-  status              Print current state (default).
-  play <file>         Set and start a video file.
-  stop                Stop; static wallpaper shows through.
-  toggle              Flip on/off (good for a keybind).
-  pause | resume      Pause/resume playback.
-  screen <name|all>   Play on a specific output, or all.
-  autopause <on|off>  Pause video under fullscreen windows.
+  status                Print current state, per monitor (default).
+  screens               List each monitor and the clip it is showing.
+  play <file> [screen]  Start a video everywhere, or on one monitor.
+  off <screen>          Blank one monitor; the others keep playing.
+  clear <screen|all>    Drop a monitor's own clip; follow the default again.
+  stop                  Stop; static wallpaper shows through.
+  toggle                Flip on/off (good for a keybind).
+  pause | resume        Pause/resume playback.
+  screen <name|all>     Coarse targeting for monitors with no clip of their own.
+  autopause <on|off>    Pause video under fullscreen windows.
+
+Different clips on different screens:
+  ${0##*/} play ~/Videos/a.mp4 DP-1
+  ${0##*/} play ~/Videos/b.mp4 HDMI-A-1
+  ${0##*/} off DP-2          # that one stays on the static wallpaper
 
 A playing wallpaper resumes automatically after reboot — no autostart step.
 USAGE

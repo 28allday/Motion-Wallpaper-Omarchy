@@ -25,28 +25,90 @@ Item {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(fg, 1.5)
 
+  // ---- screen scope ------------------------------------------------------
+  // Which screen the video list acts on: "all", or one connector name. This is
+  // panel-local — picking a screen here does NOT turn the others off, it just
+  // aims the next click. Assigning a clip to one screen leaves the rest alone,
+  // which is how different monitors end up with different wallpapers.
+  property string scope: "all"
+
+  readonly property bool multiScreen: Quickshell.screens.length > 1
+
+  // A screen that has been unplugged since the panel was last open.
+  function scopeValid() {
+    if (panel.scope === "all") return true
+    var s = Quickshell.screens
+    for (var i = 0; i < s.length; i++) if (String(s[i].name) === panel.scope) return true
+    return false
+  }
+
+  onScopeChanged: if (!scopeValid()) scope = "all"
+
+  // What the scope should be each time the panel opens. Once the screens have
+  // been set individually, "All screens" is a destructive default — one click
+  // would flatten the lot — so the panel opens aimed at the monitor it is on,
+  // and "All screens" becomes a deliberate choice. Until then it opens global,
+  // which is what a one-clip-everywhere user wants.
+  function resetScope() {
+    var own = panel.widget ? String(panel.widget.screenName || "") : ""
+    panel.scope = (panel.multiScreen && panel.screensDiffer && own !== "") ? own : "all"
+  }
+
   // ---- derived state -----------------------------------------------------
   readonly property bool hasSvc: !!service
-  readonly property string videoPath: service ? String(service.videoPath || "") : ""
+  // The clip assigned to whatever the scope is — the default clip for "all",
+  // otherwise that screen's own (falling back to the default it inherits).
+  readonly property string videoPath: {
+    if (!service) return ""
+    if (scope === "all") return String(service.videoPath || "")
+    return String(service.configuredPathForScreen(scope) || "")
+  }
   readonly property string videoName: videoPath !== "" ? videoPath.split("/").pop() : ""
+  readonly property bool videoExists: !!service && videoPath !== "" && service.pathExists(videoPath)
   readonly property string stateText: {
     if (!service) return "Service unavailable"
-    if (videoPath === "") return "No video selected"
-    if (!service.videoFileExists) return "File missing"
+    if (videoPath === "") return scope === "all" ? "No video selected" : "Screen off"
+    if (!videoExists) return "File missing"
     if (!service.enabled) return "Stopped"
     if (service.manualPaused) return "Paused"
     return "Playing"
   }
-  readonly property bool isPlaying: !!service && service.enabled && service.videoFileExists
-                                    && !service.manualPaused && videoPath !== ""
+  // Naming one clip would be a lie while the screens are showing different
+  // ones, so scope "all" says so instead.
+  readonly property string metaText: {
+    if (scope === "all" && screensDiffer) return stateText + "  ·  set per screen"
+    return stateText + (videoName !== "" ? "  ·  " + videoName : "")
+  }
+
+  readonly property bool isPlaying: !!service && service.enabled && service.rendering === true
+                                    && !service.manualPaused
   readonly property bool isPaused: !!service && service.enabled && service.manualPaused
 
   // ---- screen options ----------------------------------------------------
+  // Each screen is labelled with the clip it is set to, so the dropdown
+  // doubles as the per-monitor readout.
   readonly property var screenOptions: {
     var o = [{ value: "all", label: "All screens" }]
     var s = Quickshell.screens
-    for (var i = 0; i < s.length; i++) o.push({ value: String(s[i].name), label: String(s[i].name) })
+    for (var i = 0; i < s.length; i++) {
+      var n = String(s[i].name)
+      var p = service ? String(service.configuredPathForScreen(n) || "") : ""
+      o.push({ value: n, label: n + " · " + (p === "" ? "off" : p.split("/").pop()) })
+    }
     return o
+  }
+
+  // Do the screens disagree about what they are playing?
+  readonly property bool screensDiffer: {
+    if (!service || !multiScreen) return false
+    var s = Quickshell.screens
+    var first = null
+    for (var i = 0; i < s.length; i++) {
+      var p = String(service.configuredPathForScreen(String(s[i].name)) || "")
+      if (first === null) first = p
+      else if (p !== first) return true
+    }
+    return false
   }
 
   // ---- video discovery ---------------------------------------------------
@@ -54,11 +116,15 @@ Item {
 
   function rescan() { scanProc.running = true }
 
-  Component.onCompleted: rescan()
+  Component.onCompleted: { rescan(); resetScope() }
 
   Connections {
     target: panel.widget || null
-    function onOpenedChanged() { if (panel.widget && panel.widget.opened) panel.rescan() }
+    function onOpenedChanged() {
+      if (!panel.widget || !panel.widget.opened) return
+      panel.rescan()
+      panel.resetScope()
+    }
   }
 
   Process {
@@ -93,47 +159,21 @@ Item {
     spacing: Style.spacing.panelGap
 
     // ---------- header ----------
-    Item {
+    // The scoped screen rides in the hero's detail pill, so the meta line stays
+    // "<state> · <clip>" whether one screen or all of them are in scope.
+    PanelHero {
       width: parent.width
-      implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight)
-
-      Text {
-        id: heroIcon
-        anchors.left: parent.left
-        anchors.verticalCenter: parent.verticalCenter
-        text: "󰕧"
-        color: panel.widget ? panel.widget.iconColor : panel.fg
-        font.family: panel.fontFamily
-        font.pixelSize: Style.font.display
-      }
-
-      Column {
-        id: heroLabels
-        anchors.left: heroIcon.right
-        anchors.leftMargin: Style.spacing.rowPaddingX
-        anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
-        spacing: Style.spacing.xxs
-
+      title: "Motion Wallpaper"
+      detail: panel.multiScreen && panel.scope !== "all" ? panel.scope : ""
+      meta: panel.metaText
+      foreground: panel.fg
+      fontFamily: panel.fontFamily
+      iconComponent: Component {
         Text {
-          text: "Motion Wallpaper"
-          color: panel.fg
+          text: "󰕧"
+          color: panel.widget ? panel.widget.iconColor : panel.fg
           font.family: panel.fontFamily
-          font.pixelSize: Style.font.title
-          font.bold: true
-          elide: Text.ElideRight
-          width: parent.width
-        }
-        Text {
-          text: panel.stateText.toUpperCase()
-              + (panel.videoName !== "" ? "  ·  " + panel.videoName : "")
-          color: panel.dim
-          font.family: panel.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: true
-          font.letterSpacing: 0.8
-          elide: Text.ElideRight
-          width: parent.width
+          font.pixelSize: Style.font.display
         }
       }
     }
@@ -166,13 +206,26 @@ Item {
     }
 
     // ---------- screen selector ----------
+    // Aims the video list. "All screens" sets one clip everywhere; picking a
+    // screen changes only that one, so each monitor can run its own clip.
     Dropdown {
       id: screenDropdown
+      visible: panel.multiScreen
       width: parent.width
       label: "SCREEN"
       options: panel.screenOptions
-      value: panel.service ? String(panel.service.output) : "all"
-      onChanged: function(v) { if (panel.widget) panel.widget.setOutput(v) }
+      value: panel.scope
+      onChanged: function(v) { panel.scope = String(v) }
+    }
+
+    Text {
+      visible: panel.multiScreen && panel.scope === "all" && panel.screensDiffer
+      width: parent.width
+      text: "Screens are set individually — pick one above to change just it."
+      color: panel.dim
+      font.family: panel.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      wrapMode: Text.WordWrap
     }
 
     // ---------- auto-pause switch ----------
@@ -189,7 +242,8 @@ Item {
     PanelSeparator { foreground: panel.fg }
 
     PanelSectionHeader {
-      text: "VIDEOS"
+      text: !panel.multiScreen ? "VIDEOS"
+          : (panel.scope === "all" ? "VIDEOS · ALL SCREENS" : "VIDEOS · " + panel.scope)
       foreground: panel.fg
       fontFamily: panel.fontFamily
     }
@@ -198,7 +252,7 @@ Item {
     Text {
       visible: panel.videos.length === 0
       width: parent.width
-      text: "Drop clips in ~/Videos/Wallpapers"
+      text: "Drop clips in ~/Videos"
       color: panel.dim
       font.family: panel.fontFamily
       font.pixelSize: Style.font.bodySmall
@@ -207,7 +261,7 @@ Item {
 
     Flickable {
       id: videoFlick
-      visible: panel.videos.length > 0
+      visible: panel.videos.length > 0 || panel.scope !== "all"
       width: parent.width
       height: Math.min(videoList.implicitHeight, Style.space(240))
       contentWidth: width
@@ -221,6 +275,42 @@ Item {
         id: videoList
         width: parent.width
         spacing: Style.spacing.xxs
+
+        // Blank just this screen. Only offered when one screen is scoped —
+        // the global equivalent is the Stop button.
+        Rectangle {
+          id: offRow
+          visible: panel.scope !== "all"
+          readonly property bool current: panel.videoPath === ""
+          width: videoList.width
+          height: Style.spacing.controlHeight
+          radius: Style.cornerRadius
+          color: current
+            ? Style.selectedFillFor(panel.fg, Color.accent)
+            : (offMouse.containsMouse ? Style.hoverFillFor(panel.fg, Color.accent) : "transparent")
+
+          Text {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.spacing.controlPaddingX
+            anchors.rightMargin: Style.spacing.controlPaddingX
+            text: "Off — static wallpaper"
+            color: offRow.current ? Style.selectedStateColor(panel.fg, Color.accent) : panel.dim
+            font.family: panel.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: offRow.current
+            elide: Text.ElideRight
+          }
+
+          MouseArea {
+            id: offMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: if (panel.widget) panel.widget.offScreen(panel.scope)
+          }
+        }
 
         Repeater {
           model: panel.videos
@@ -268,7 +358,11 @@ Item {
               anchors.fill: parent
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
-              onClicked: if (panel.widget) panel.widget.playPath(vrow.modelData.path)
+              onClicked: {
+                if (!panel.widget) return
+                if (panel.scope === "all") panel.widget.playAll(vrow.modelData.path)
+                else panel.widget.playPathOn(panel.scope, vrow.modelData.path)
+              }
             }
           }
         }

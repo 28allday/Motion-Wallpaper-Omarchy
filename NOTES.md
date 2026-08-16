@@ -22,10 +22,13 @@ The repo root *is* the plugin — that is what Omarchy clones and validates.
 The plugin renders one `PanelWindow` per targeted monitor on the Wayland
 background layer (namespace `omarchy-motion-background`), using QtMultimedia
 `MediaPlayer` + `VideoOutput`. It loads after the first-party static-wallpaper
-surface (`omarchy-background`), so it stacks above it. When no video is set, the
-file is missing, or the plugin is stopped, **no surface is created at all** — the
-static wallpaper simply shows through, which is why a broken state never leaves
-a black or frozen rectangle on the desktop.
+surface (`omarchy-background`), so it stacks above it. When a monitor has no
+video set, its file is missing, or the plugin is stopped, **no surface is
+created there at all** — the static wallpaper simply shows through, which is why
+a broken state never leaves a black or frozen rectangle on the desktop.
+
+Each surface resolves **its own** clip rather than sharing one, so monitors can
+differ. See "Per-monitor clips" below.
 
 Auto-pause listens to Hyprland's event stream via `Quickshell.Hyprland` and, on
 any fullscreen-affecting event, reads per-monitor ground truth back from
@@ -37,7 +40,8 @@ monitor whose visible workspace has a fullscreen window.
 Two sources, with a deliberate split:
 
 - an optional **`plugins[]` entry in `shell.json`** for this plugin id is the
-  config seed — `videoPath`, `enabled`, `output`, `pauseOnFullscreen`.
+  config seed — `videoPath`, `enabled`, `output`, `pauseOnFullscreen`,
+  `screenVideos`.
   `Service.qml`'s `pluginConfig` falls back to `{}` when there is no entry, so
   every setting has a working default and the plugin runs without one.
 - **`~/.local/state/motion-wallpaper/state.json`** is the runtime truth. IPC
@@ -46,6 +50,53 @@ Two sources, with a deliberate split:
 
 That split is why there is no autostart step: `play` means it returns after a
 reboot, `stop` means it stays off.
+
+### Per-monitor clips
+
+`pathForScreen(name)` is the single rule that decides what a monitor shows,
+resolved most-specific-first:
+
+1. `screenVideos[name]` — that monitor's own clip. **Present-but-empty means
+   "stay static"**, which is distinct from absent; that distinction is what lets
+   one screen be blanked while the others play, and it is why the map is read
+   with `hasOwnProperty` rather than truthiness.
+2. `videoPath`, if `output` is `"all"` or names this monitor.
+3. nothing.
+
+`output` therefore survives as coarse, CLI-facing targeting for monitors with
+*no* clip of their own; per-monitor entries always win. Keys for disconnected
+monitors are deliberately kept, so a screen gets its clip back when it returns.
+
+Three consequences worth remembering when editing:
+
+- **`activeScreens` must keep returning the same `ScreenInfo` objects.**
+  `Variants` diffs by identity, so rebuilding the array on a clip change adds
+  and removes nothing and the surface survives — which is what lets the
+  cross-fade run. Returning freshly-built wrapper objects (`{screen, url}`)
+  instead would destroy and recreate the surface on every clip change and take
+  the cross-fade with it. Each `PanelWindow` reads its own url from
+  `root.urlForScreen(monName)`; QML tracks the property reads inside that call,
+  so it stays reactive without going through the model.
+- **File existence is a map, not a bool.** Several clips can be in play at once,
+  so one batched process (`for p in "$@"; do [ -f "$p" ]`) fills
+  `existingPaths`, keyed by *resolved* path. `videoFileExists` remains as a
+  derived property because the panel, the bar icon and the CLI still read it.
+- **The bar icon keys off `rendering`** (`activeScreens.length > 0`), not
+  "enabled and the default file exists" — with per-monitor clips the wallpaper
+  can be running with `videoPath` empty, or every monitor can have been blanked
+  individually.
+
+The panel's SCREEN dropdown is **panel-local scope**, not service state: it aims
+the video list at one monitor (or all) and picking a screen there changes
+nothing on its own. Only "All screens" writes globally — `applyPlayAll()` sets
+`videoPath`, drops every override and resets `output` to `"all"`, so that choice
+means what it says (and self-heals a stale `output` left by the CLI).
+
+`resetScope()` runs on every open, and deliberately does **not** always land on
+"All screens": once the screens disagree, that default is destructive — one
+click would flatten a per-screen setup — so the panel opens aimed at its own
+monitor instead. The bar mounts one widget per screen, so "its own monitor" is
+`button.QsWindow.window.screen.name`, surfaced as `screenName` on the widget.
 
 ### Cross-fade on clip change
 
@@ -135,6 +186,20 @@ are easy to get wrong:
 - **Reload after a QML edit is `omarchy-restart-shell`.** `rescanPlugins` only
   discovers plugins and manifest changes; it does not reload edited QML. Never
   use `omarchy-refresh-shell` — it resets `shell.json`.
+- **The panel can be opened without a mouse:**
+  `omarchy-shell shell toggle nosignal.motion-wallpaper`. `Bar.findPanelWidget`
+  routes that to whichever per-monitor bar instance should own it, and it only
+  finds widgets exposing `open()`, `close()` and `opened` on the widget root —
+  which is why those three stay on `BarWidget.qml` even though the panel state
+  lives below them. It is also the only way to screenshot the panel from a
+  script, and the keybinding users get for free.
+- **Styling comes from the shell's own kit**, not from re-drawn lookalikes:
+  `PanelHero` for the header (title + `detail` pill + uppercase `meta` line),
+  `Dropdown`, `Toggle`, `Button`, `PanelSectionHeader`, `PanelSeparator`, and
+  `Style.hoverFillFor` / `selectedFillFor` / `selectedStateColor` for list rows —
+  the same helpers the first-party audio, bluetooth and clock panels use. A
+  hand-rolled header drifts from the rest of the shell the first time the kit's
+  metrics change.
 - **`hyprctl dispatch workspace N` does not work on Omarchy 4.** Dispatch is a
   Lua shorthand for `hl.dispatch(...)` and wants a dispatcher object under
   `hl.dsp.*`; the plain form and every quoted variant fail. Use the screenshot
@@ -151,8 +216,9 @@ are easy to get wrong:
 
 ## Known limitations
 
-- Multi-monitor targeting and the `output` selector beyond `"all"` are
-  implemented and applied live, but have only been exercised on a single-output
-  machine.
+- Per-monitor clips and the `output` selector beyond `"all"` are implemented and
+  applied live, but the dev box has one output — the multi-monitor paths
+  (a different clip per screen, blanking one screen, hot-plug) still want a
+  hardware pass on a two-monitor setup.
 - Decoding runs continuously on the GPU. Auto-pause covers fullscreen windows;
   on battery, stopping or using a shorter, lower-bitrate clip is the bigger win.
