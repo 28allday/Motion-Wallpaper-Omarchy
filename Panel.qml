@@ -125,6 +125,8 @@ Item {
   // Hard cap on how many clips the panel will hold and draw. The CLI takes an
   // arbitrary path, so nothing becomes unreachable by capping the browser.
   readonly property int scanLimit: 500
+  readonly property int entryLimit: 20000   // directory entries examined per folder
+  readonly property int scanSeconds: 5      // hard deadline on the scan process
   property bool videosTruncated: false
   property var videos: []   // [{ path, name }]
 
@@ -141,33 +143,54 @@ Item {
     }
   }
 
-  // The shell process is long-lived, so nothing here may grow with the size of
-  // the user's video folder — not the buffer, not the list, and not the scan
-  // itself.
+  // The shell process is long-lived, so nothing here may grow with the user's
+  // video folder — not the buffer, not the list, not the traversal, and not
+  // how long the scan is allowed to take.
   //
-  // `head` sits DIRECTLY after each `find`, not after the `sort`. A `sort` in
-  // between would have to consume the whole library before emitting its first
-  // line, so `find` would run to completion however small the cap was, and the
-  // sort's own temporary storage would be unbounded too. Downstream of `find`,
-  // `head` exits at the cap and `find` dies of SIGPIPE on its next write, so
-  // the traversal stops early; `sort -u` then sees at most two capped chunks.
+  // Capping matches alone is not enough, which is the trap the first attempt
+  // fell into. `head` can only kill the producer once the producer has
+  // *emitted* enough lines, so a folder of a million non-videos yields nothing
+  // to cap and gets walked in full. Three separate bounds are needed:
   //
-  // What stays unbounded is reading the directory itself: `find` must look at
-  // entries to know which ones match, so a folder with a million non-videos is
-  // still one large readdir. `-maxdepth 1` keeps that to a single directory
-  // rather than a tree.
+  //   * `ls -U` streams entries in directory order and is cut off by
+  //     `head -n entryLimit`, so the number of entries EXAMINED is bounded,
+  //     not just the number matched;
+  //   * the extension filter runs before any `stat`, so at most `scanLimit`
+  //     files per directory are ever tested with `[ -f ]`;
+  //   * `timeout` puts a hard ceiling on the process's lifetime whatever the
+  //     filesystem does — a slow or hung mount cannot pin the scan open.
   //
-  // One line past the cap is requested so "there are more" is detectable
-  // without a second scan.
+  // Arguments go in as positional parameters rather than interpolated into the
+  // script text, so no path can alter the command.
+  readonly property string scanScript:
+    'lim=$1; emax=$2\n' +
+    'for d in "$HOME/Videos/Wallpapers" "$HOME/Videos"; do\n' +
+    '  [ -d "$d" ] || continue\n' +
+    '  entries=$(ls -U -1 -- "$d" 2>/dev/null | head -n "$emax")\n' +
+    '  [ -n "$entries" ] || continue\n' +
+    '  if [ "$(printf "%s\\n" "$entries" | wc -l)" -ge "$emax" ]; then\n' +
+    '    printf "TRUNC\\n" >&2\n' +
+    '  fi\n' +
+    '  printf "%s\\n" "$entries" |\n' +
+    '    grep -iE "\\.(mp4|mkv|webm|mov|avi)$" | head -n "$lim" |\n' +
+    '    while IFS= read -r f; do\n' +
+    '      [ -f "$d/$f" ] && printf "%s/%s\\n" "$d" "$f"\n' +
+    '    done\n' +
+    'done | sort -u | head -n "$lim"\n'
+
   Process {
     id: scanProc
-    command: ["bash", "-c",
-      "lim=" + (panel.scanLimit + 1) + "; " +
-      "for d in \"$HOME/Videos/Wallpapers\" \"$HOME/Videos\"; do " +
-      "[ -d \"$d\" ] && find \"$d\" -maxdepth 1 -type f " +
-      "\\( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.mov' -o -iname '*.avi' \\) " +
-      "2>/dev/null | head -n \"$lim\"; " +
-      "done | sort -u | head -n \"$lim\""]
+    command: ["timeout", "-k", "1", String(panel.scanSeconds),
+              "bash", "-c", panel.scanScript, "_",
+              String(panel.scanLimit + 1), String(panel.entryLimit)]
+    // Hitting the entry cap exits 0, so it would otherwise truncate in
+    // silence — which reads as "there was nothing else", a worse lie than a
+    // cap. The script says so on stderr; a non-zero exit (the deadline firing,
+    // or the pipeline cut short) is the other way the view can be partial.
+    onExited: function(code) { if (code !== 0) panel.videosTruncated = true }
+    stderr: StdioCollector {
+      onStreamFinished: if (String(text || "").indexOf("TRUNC") !== -1) panel.videosTruncated = true
+    }
     stdout: StdioCollector {
       onStreamFinished: {
         var seen = ({})

@@ -243,29 +243,33 @@ The shell is long-lived, so nothing the panel does may scale with the size of
   delegate, so the enclosing `Flickable` bounded what you could *see* and not
   what existed.
 
-Both are bounded now, and **where the `head` sits is the whole point**. It has
-to be DIRECTLY after each `find`:
+Bounding what the scan **emits** is not the same as bounding what it **does**,
+and that distinction cost two review rounds. `head` can only kill the producer
+once the producer has emitted enough lines, so a folder holding a million
+non-videos never reaches the cap and gets walked in full. Three separate bounds
+are needed, and the walker is no longer `find`:
 
-```sh
-find "$d" … | head -n "$lim"     # find dies of SIGPIPE at the cap
-done | sort -u | head -n "$lim"  # sort now sees two capped chunks
-```
+- **entries examined** — `ls -U` streams in directory order and is cut off by
+  `head -n entryLimit` (20,000), so the count of entries *looked at* is capped,
+  not just the count matched;
+- **work per match** — the extension filter runs before any `stat`, so at most
+  `scanLimit` files per directory are ever tested with `[ -f ]`;
+- **wall-clock** — `timeout` wraps the whole process, the only bound that helps
+  when it is blocked in a syscall on a dead network mount. An in-loop check
+  never runs if nothing is being produced.
 
-A `sort -u` *between* `find` and `head` is a full barrier: it must consume the
-entire library before it emits its first line, so `find` runs to completion
-however small the cap is, and the sort's own temporary storage is unbounded
-too. Measured on a 20,000-file directory with a cap of 501, counting what
-`find` actually emitted (`-fprintf` to a log, which stops when it dies):
+Measured on a deliberately sparse directory — 60,003 entries, only 3 of them
+videos, which is the case a match-cap cannot touch:
 
-| pipeline | entries `find` emitted | wall |
+| pipeline | entries examined | wall |
 |---|---|---|
-| `find \| sort -u \| head` | **20,000 of 20,000** | ~19 ms |
-| `find \| head \| sort -u \| head` | **945 of 20,000** | ~9 ms |
+| `find \| head \| sort \| head` | **60,003 — all of them** | 41 ms |
+| `ls -U \| head \| grep \| head` | **20,000, capped** | 25 ms |
 
-The 945 rather than 501 is one stdio block of over-read before the signal
-lands. What stays unbounded is reading the directory itself — `find` must look
-at entries to know which match, so a folder of a million non-videos is still
-one large readdir; `-maxdepth 1` keeps that to a single directory, not a tree.
+Hitting the entry cap **exits 0**, so it would truncate silently — which reads
+as "there was nothing else", a worse lie than a cap. The script reports it on
+**stderr**, and a non-zero exit (deadline fired) sets the same flag. Arguments
+go in as positional parameters, never interpolated into the script text.
 
 Asking for one line past the cap is what makes "there are more" detectable
 without a second scan. The list is a `ListView`, which recycles delegates, so
@@ -285,6 +289,28 @@ CLI takes an arbitrary path — `motion-wallpaper play <path>` plays a clip the
 list never showed, which is what the truncation note tells the user. Reset
 `videosTruncated` at the top of every scan or the note outlives the library that
 earned it.
+
+### Reading state.json without loading it
+
+A `FileView` reads the **whole file into the shell before any handler of ours
+runs**, so checking the size inside `applyStateText` rejected an oversized file
+only after it had already been allocated in the long-lived process — and the
+allocation was the thing being prevented. Quickshell's `FileView` has no
+size-bound property, so the read goes through `head -c <cap + 1>` in a helper
+instead, and `FileView` is gone from this plugin entirely.
+
+Two rules that shaped it:
+
+- **Read one byte past the cap.** That is what separates "exactly at the limit"
+  from "truncated" without looking at the file twice.
+- **Never size-then-reopen.** A `stat` describes a file the reopen may not get,
+  and the reopen is the unbounded one. One bounded read, then validate what is
+  held.
+
+Writes are atomic without `FileView` too: a `mktemp` in the same directory then
+`mv -f` over the target, with the payload passed as a positional parameter. A
+write arriving while one is in flight is held in `_pendingState` and issued on
+exit, so concurrent saves cannot interleave.
 
 ### state.json is untrusted input
 

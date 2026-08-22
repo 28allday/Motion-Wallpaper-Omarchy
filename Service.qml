@@ -251,7 +251,7 @@ Item {
       pauseOnFullscreen: root.pauseOnFullscreen,
       screenVideos: root.screenVideos || ({})
     }, null, 2) + "\n"
-    stateFile.setText(payload)
+    root.writeState(payload)
   }
 
   // Accept only a flat { connector: path } object of strings — anything else in
@@ -348,20 +348,57 @@ Item {
 
   onPluginConfigChanged: syncSeedFromConfig()
 
-  FileView {
-    id: stateFile
-    path: root.statePath
-    atomicWrites: true
-    printErrors: false
-    onLoaded: { root.applyStateText(text()); root._stateLoaded = true; root.syncSeedFromConfig() }
-    onLoadFailed: function(err) { root._stateLoaded = true; root.syncSeedFromConfig() }
+  // state.json is read through `head -c`, not through a FileView.
+  //
+  // A FileView loads the WHOLE file into the shell before any handler of ours
+  // runs, so checking the size in `applyStateText` rejected an oversized file
+  // only after it had already been allocated in the long-lived process — the
+  // allocation was the thing to prevent. Quickshell's FileView has no
+  // size-bound property, so the read has to go through a helper that stops
+  // reading at the limit.
+  //
+  // Reading one byte past the cap is what distinguishes "exactly at the limit"
+  // from "truncated", without a second look at the file. Deliberately NOT
+  // size-then-reopen: that describes a file the reopen might not get, and the
+  // reopen is the unbounded one. One bounded read, then validate what is held.
+  Process {
+    id: stateReadProc
+    command: ["bash", "-c", 'head -c "$1" -- "$2" 2>/dev/null || true',
+              "_", String(root.maxStateBytes + 1), root.statePath]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.applyStateText(text())
+        root._stateLoaded = true
+        root.syncSeedFromConfig()
+      }
+    }
+  }
+
+  // Atomic write: a temp file in the same directory, then rename over the
+  // target. The payload is built from already-clamped values and goes in as a
+  // positional parameter, never interpolated into the script.
+  Process {
+    id: stateWriteProc
+    onExited: if (root._pendingState !== "") { var q = root._pendingState; root._pendingState = ""; root.writeState(q) }
+  }
+
+  property string _pendingState: ""
+
+  function writeState(payload) {
+    if (stateWriteProc.running) { root._pendingState = payload; return }
+    stateWriteProc.command = ["bash", "-c",
+      'd=$(dirname -- "$1"); mkdir -p -- "$d" || exit 1; ' +
+      't=$(mktemp -- "$1.XXXXXX") || exit 1; ' +
+      'printf %s "$2" > "$t" && mv -f -- "$t" "$1" || { rm -f -- "$t"; exit 1; }',
+      "_", root.statePath, payload]
+    stateWriteProc.running = true
   }
 
   // Make sure the state dir exists, then (re)load the state file.
   Process {
     id: mkStateDir
     command: ["mkdir", "-p", root.stateDir]
-    onExited: stateFile.reload()
+    onExited: stateReadProc.running = true
   }
 
   Component.onCompleted: mkStateDir.running = true
