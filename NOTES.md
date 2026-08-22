@@ -290,6 +290,35 @@ list never showed, which is what the truncation note tells the user. Reset
 `videosTruncated` at the top of every scan or the note outlives the library that
 earned it.
 
+### A byte cap is not a deadline
+
+Bounding *how much* a helper reads says nothing about *how long* it takes.
+Point a user-writable path at a **FIFO** and the open blocks until a peer
+attaches — forever, in practice — so the helper and whatever it was
+initialising stay alive for the life of the session. Measured, with a FIFO in
+place of each path:
+
+| call | unguarded | guarded |
+|---|---|---|
+| `head -c` on the state path | **hangs** (killed at 6 s) | 2 ms |
+| the CLI's `2>>"$LOG_FILE"` | **hangs** (killed at 6 s) | 44 ms |
+
+Two guards, because neither is enough alone:
+
+- **`[ -f ]` refuses anything that is not a regular file.** It stats rather
+  than opens, so on a FIFO it answers immediately where the open would block.
+  The CLI refuses a symlink too, rather than following one out of the cache
+  directory.
+- **`timeout` wraps every helper** — that is the only thing that helps when the
+  block is in the syscall itself, as on a dead network mount, before any test
+  of ours gets to run.
+
+**Every** helper is wrapped via `timeoutPrefix`, not only the one that prompted
+it: the state read and write, the `mkdir`, the stat probe and the fullscreen
+watcher. A subprocess in a long-lived shell must never be able to outlive its
+job. The atomic write also self-heals a hostile path — `mv -f` puts a regular
+file back over the FIFO, verified live.
+
 ### Reading state.json without loading it
 
 A `FileView` reads the **whole file into the shell before any handler of ours

@@ -74,6 +74,21 @@ Item {
   readonly property int maxPathLength: 4096     // PATH_MAX; longer is not a real path
   readonly property int maxScreenVideos: 64     // far above any real monitor count
   readonly property int maxNameLength: 256      // connector names are short
+  readonly property int helperSeconds: 5        // hard deadline on every helper process
+
+  // A byte cap bounds how much is read, NOT how long the read takes. Point the
+  // state path at a FIFO and `head -c` blocks forever waiting for a writer,
+  // which pins the helper and state initialisation open for the life of the
+  // session. Two guards, because neither is sufficient alone:
+  //
+  //   * `[ -f ]` refuses anything that is not a regular file. It stats rather
+  //     than opens, so it answers immediately on a FIFO instead of blocking.
+  //   * `timeout` covers what a stat cannot answer quickly — a dead network
+  //     mount blocks in the syscall itself, before any test of ours runs.
+  //
+  // Every helper below is wrapped, not just the one that reads state: a
+  // subprocess in a long-lived shell must never be able to outlive its job.
+  readonly property var timeoutPrefix: ["timeout", "-k", "1", String(root.helperSeconds)]
 
   // Clamp a connector/output name, falling back to `fallback` when it cannot
   // be one. Names are short by nature, so an over-long one is never genuine.
@@ -165,8 +180,8 @@ Item {
     var paths = candidatePaths()
     if (paths.length === 0) { root.existingPaths = ({}); return }
     if (statProc.running) { statDebounce.restart(); return }
-    statProc.command = ["bash", "-c",
-      'for p in "$@"; do [ -f "$p" ] && printf "%s\\n" "$p"; done', "_"].concat(paths)
+    statProc.command = root.timeoutPrefix.concat(
+      ["bash", "-c", 'for p in "$@"; do [ -f "$p" ] && printf "%s\\n" "$p"; done', "_"]).concat(paths)
     statProc.running = true
   }
 
@@ -363,8 +378,10 @@ Item {
   // reopen is the unbounded one. One bounded read, then validate what is held.
   Process {
     id: stateReadProc
-    command: ["bash", "-c", 'head -c "$1" -- "$2" 2>/dev/null || true',
-              "_", String(root.maxStateBytes + 1), root.statePath]
+    command: root.timeoutPrefix.concat(
+      ["bash", "-c",
+       '[ -f "$2" ] || exit 0; head -c "$1" -- "$2" 2>/dev/null || true',
+       "_", String(root.maxStateBytes + 1), root.statePath])
     stdout: StdioCollector {
       onStreamFinished: {
         root.applyStateText(text())
@@ -386,18 +403,18 @@ Item {
 
   function writeState(payload) {
     if (stateWriteProc.running) { root._pendingState = payload; return }
-    stateWriteProc.command = ["bash", "-c",
+    stateWriteProc.command = root.timeoutPrefix.concat(["bash", "-c",
       'd=$(dirname -- "$1"); mkdir -p -- "$d" || exit 1; ' +
       't=$(mktemp -- "$1.XXXXXX") || exit 1; ' +
       'printf %s "$2" > "$t" && mv -f -- "$t" "$1" || { rm -f -- "$t"; exit 1; }',
-      "_", root.statePath, payload]
+      "_", root.statePath, payload])
     stateWriteProc.running = true
   }
 
   // Make sure the state dir exists, then (re)load the state file.
   Process {
     id: mkStateDir
-    command: ["mkdir", "-p", root.stateDir]
+    command: root.timeoutPrefix.concat(["mkdir", "-p", root.stateDir])
     onExited: stateReadProc.running = true
   }
 
@@ -430,7 +447,7 @@ Item {
 
   Process {
     id: fsProc
-    command: ["python3", "-c", root.fsScript]
+    command: root.timeoutPrefix.concat(["python3", "-c", root.fsScript])
     stdout: StdioCollector {
       onStreamFinished: {
         var set = ({})

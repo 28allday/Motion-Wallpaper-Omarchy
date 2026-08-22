@@ -34,12 +34,22 @@ LOG_FILE="$LOG_DIR/motion-wallpaper.log"
 LOG_MAX_BYTES=$(( 256 * 1024 ))
 mkdir -p "$LOG_DIR"
 
+# Opening a FIFO for append blocks until a reader attaches, so a special file
+# at the log path would hang every invocation of this CLI for good — the same
+# class of bug as reading state through a blocking path. `[ -f ]` stats rather
+# than opens, so it answers immediately where the redirect would hang; a
+# symlink is refused too rather than followed out of the cache directory.
+if [ -e "$LOG_FILE" ] && { [ -L "$LOG_FILE" ] || [ ! -f "$LOG_FILE" ]; }; then
+  LOG_FILE=/dev/null
+fi
+
 # Every IPC call appends stderr here, and a keybind pressed against a shell
 # that is not running appends on every press — so the log has to be bounded or
 # it grows without limit. One rotation keeps the most recent failures, which is
 # all this log is ever read for.
 rotate_log() {
   local size
+  [ -f "$LOG_FILE" ] || return 0
   size=$(stat -c %s "$LOG_FILE" 2>/dev/null) || return 0
   [ "$size" -gt "$LOG_MAX_BYTES" ] || return 0
   mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || : > "$LOG_FILE"
