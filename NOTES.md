@@ -313,6 +313,14 @@ Two guards, because neither is enough alone:
   block is in the syscall itself, as on a dead network mount, before any test
   of ours gets to run.
 
+`_stateLoaded` gates the whole service, so a killed state read must still
+initialise it on defaults or the plugin sits dead. There is a deferred fallback
+on `onExited` for that — but **measured, it is not load-bearing**: when
+`timeout` kills the helper the stream closes and `onStreamFinished` fires
+anyway, and a control build with the fallback removed still initialises. It is
+insurance against an ordering Quickshell does not document, not a fix for an
+observed hang. Do not claim otherwise.
+
 **Every** helper is wrapped via `timeoutPrefix`, not only the one that prompted
 it: the state read and write, the `mkdir`, the stat probe and the fullscreen
 watcher. A subprocess in a long-lived shell must never be able to outlive its

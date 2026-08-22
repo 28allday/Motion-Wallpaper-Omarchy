@@ -384,11 +384,37 @@ Item {
        "_", String(root.maxStateBytes + 1), root.statePath])
     stdout: StdioCollector {
       onStreamFinished: {
-        root.applyStateText(text())
-        root._stateLoaded = true
-        root.syncSeedFromConfig()
+        stateReadFallback.stop()
+        root.finishStateLoad(text())
       }
     }
+    // A bail-out still has to answer: `_stateLoaded` gates the whole service,
+    // so if nothing ever initialises it, the plugin sits dead rather than
+    // falling back to defaults.
+    //
+    // Measured, that does not currently happen — when `timeout` kills this
+    // helper the stream closes and `onStreamFinished` fires anyway, and a
+    // build with this fallback removed still initialises on defaults. So it is
+    // belt-and-braces against an ordering Quickshell does not actually
+    // guarantee, not a fix for an observed hang. Deferred rather than
+    // immediate because exit and stream-finish are unordered, and the
+    // collector must win on the normal path.
+    onExited: stateReadFallback.restart()
+  }
+
+  Timer {
+    id: stateReadFallback
+    interval: 250
+    onTriggered: root.finishStateLoad("")
+  }
+
+  // Idempotent: whichever of the two paths arrives first initialises, the
+  // other becomes a no-op.
+  function finishStateLoad(txt) {
+    if (root._stateLoaded) return
+    root.applyStateText(txt)
+    root._stateLoaded = true
+    root.syncSeedFromConfig()
   }
 
   // Atomic write: a temp file in the same directory, then rename over the
