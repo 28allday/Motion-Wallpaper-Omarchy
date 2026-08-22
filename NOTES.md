@@ -307,8 +307,19 @@ Two guards, because neither is enough alone:
 
 - **`[ -f ]` refuses anything that is not a regular file.** It stats rather
   than opens, so on a FIFO it answers immediately where the open would block.
-  The CLI refuses a symlink too, rather than following one out of the cache
-  directory.
+- **`-L` is tested first, and on its own.** This is the sharp edge: `-e` is
+  **false for a dangling symlink**, so a guard written as
+  `[ -e "$P" ] && { [ -L "$P" ] || … }` is skipped entirely for exactly the
+  case that matters — and `>>` then follows the link and *creates* the
+  out-of-cache target. `-L` uses `lstat` and is the only one of the three that
+  does not follow. Order matters more than the individual tests:
+
+  ```sh
+  if [ -L "$P" ] || { [ -e "$P" ] && [ ! -f "$P" ]; }; then P=/dev/null; fi
+  ```
+
+  Verified across all four shapes — dangling symlink, symlink to a regular
+  file, FIFO and plain regular file — not just the one that prompted it.
 - **`timeout` wraps every helper** — that is the only thing that helps when the
   block is in the syscall itself, as on a dead network mount, before any test
   of ours gets to run.

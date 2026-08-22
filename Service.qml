@@ -380,7 +380,8 @@ Item {
     id: stateReadProc
     command: root.timeoutPrefix.concat(
       ["bash", "-c",
-       '[ -f "$2" ] || exit 0; head -c "$1" -- "$2" 2>/dev/null || true',
+       'if [ -L "$2" ] || [ ! -f "$2" ]; then exit 0; fi; ' +
+       'head -c "$1" -- "$2" 2>/dev/null || true',
        "_", String(root.maxStateBytes + 1), root.statePath])
     stdout: StdioCollector {
       onStreamFinished: {

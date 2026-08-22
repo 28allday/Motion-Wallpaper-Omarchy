@@ -37,9 +37,14 @@ mkdir -p "$LOG_DIR"
 # Opening a FIFO for append blocks until a reader attaches, so a special file
 # at the log path would hang every invocation of this CLI for good — the same
 # class of bug as reading state through a blocking path. `[ -f ]` stats rather
-# than opens, so it answers immediately where the redirect would hang; a
-# symlink is refused too rather than followed out of the cache directory.
-if [ -e "$LOG_FILE" ] && { [ -L "$LOG_FILE" ] || [ ! -f "$LOG_FILE" ]; }; then
+# than opens, so it answers immediately where the redirect would hang.
+#
+# `-L` is tested FIRST and on its own, because it is the only one of these
+# that does not follow the link. `-e` is *false* for a dangling symlink, so
+# gating on `-e` first let a dangling one skip the whole guard — and `>>` then
+# follows it and CREATES the out-of-cache target. Order matters more than the
+# individual tests here.
+if [ -L "$LOG_FILE" ] || { [ -e "$LOG_FILE" ] && [ ! -f "$LOG_FILE" ]; }; then
   LOG_FILE=/dev/null
 fi
 

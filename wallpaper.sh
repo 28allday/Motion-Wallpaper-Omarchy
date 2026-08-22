@@ -186,7 +186,10 @@ echo "✓ CLI installed to ~/.local/bin/motion-wallpaper"
 # do not linger in the menu.
 STALE_DESKTOP="$HOME/.local/share/applications/motion-wallpaper.desktop"
 STALE_ICON="$HOME/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg"
-if [ -e "$STALE_DESKTOP" ] || [ -e "$STALE_ICON" ]; then
+# `-L` as well as `-e`: `-e` is false for a dangling symlink, which would
+# leave one of these behind rather than clearing it.
+if [ -e "$STALE_DESKTOP" ] || [ -L "$STALE_DESKTOP" ] || \
+   [ -e "$STALE_ICON" ]    || [ -L "$STALE_ICON" ]; then
   rm -f "$STALE_DESKTOP" "$STALE_ICON"
   echo "  removed the app-menu entry and icon left by an earlier version"
   command -v update-desktop-database >/dev/null 2>&1 && \
