@@ -75,6 +75,14 @@ Item {
   readonly property int maxScreenVideos: 64     // far above any real monitor count
   readonly property int maxNameLength: 256      // connector names are short
 
+  // Clamp a connector/output name, falling back to `fallback` when it cannot
+  // be one. Names are short by nature, so an over-long one is never genuine.
+  function safeName(v, fallback) {
+    var t = String(v === null || v === undefined ? "" : v).trim()
+    if (t === "" || t.length > root.maxNameLength) return fallback
+    return t
+  }
+
   // Clamp a value to a sane path string, or "" if it cannot be one.
   function safePath(v) {
     if (v === null || v === undefined) return ""
@@ -283,8 +291,7 @@ Item {
         if (o.videoPath !== undefined) root.videoPath = root.safePath(o.videoPath)
         if (o.enabled !== undefined) root.enabled = (o.enabled === true || String(o.enabled) === "true")
         if (o.output !== undefined) {
-          var ov = String(o.output || "all")
-          root.output = (ov.length > root.maxNameLength || ov === "") ? "all" : ov
+          root.output = root.safeName(o.output, "all")
           root._stateHadOutput = true
         }
         if (o.pauseOnFullscreen !== undefined) {
@@ -309,9 +316,9 @@ Item {
   // wholesale when the shell.json entry is edited; between those, runtime
   // (IPC/panel) mutations win.
   function syncSeedFromConfig() {
-    var vp = String(cfg("videoPath", "") || "")
+    var vp = root.safePath(cfg("videoPath", ""))
     var en = cfg("enabled", true) === true || String(cfg("enabled", "true")) === "true"
-    var op = String(cfg("output", "all") || "all") || "all"
+    var op = root.safeName(cfg("output", "all"), "all")
     var pf = cfg("pauseOnFullscreen", true) === true || String(cfg("pauseOnFullscreen", "true")) === "true"
     var sv = normalizeScreenVideos(cfg("screenVideos", null))
     var sig = JSON.stringify([vp, en, op, pf, sv])
@@ -669,7 +676,7 @@ Item {
 
   // Enable + (optionally) set a new video, then persist.
   function applyPlay(path) {
-    var p = String(path || "").trim()
+    var p = root.safePath(String(path || "").trim())
     if (p) root.videoPath = p
     root.enabled = true
     root.manualPaused = false
@@ -700,7 +707,7 @@ Item {
   // them. This is what the panel's "All screens" scope calls; the plain
   // applyPlay() above leaves overrides and `output` alone.
   function applyPlayAll(path) {
-    var p = String(path || "").trim()
+    var p = root.safePath(String(path || "").trim())
     if (p) root.videoPath = p
     root.screenVideos = ({})
     root.output = "all"
@@ -756,8 +763,7 @@ Item {
   // Persists and re-evaluates activeScreens, so the video surfaces
   // move/appear/disappear with NO shell restart.
   function applySetOutput(name) {
-    var n = String(name || "all").trim()
-    root.output = n === "" ? "all" : n
+    root.output = root.safeName(name, "all")
     root.persistState()
     return root.statusObject()
   }

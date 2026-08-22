@@ -31,7 +31,20 @@ APP_NAME="Motion Wallpaper"
 IPC_TARGET="motion-wallpaper"
 LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
 LOG_FILE="$LOG_DIR/motion-wallpaper.log"
+LOG_MAX_BYTES=$(( 256 * 1024 ))
 mkdir -p "$LOG_DIR"
+
+# Every IPC call appends stderr here, and a keybind pressed against a shell
+# that is not running appends on every press — so the log has to be bounded or
+# it grows without limit. One rotation keeps the most recent failures, which is
+# all this log is ever read for.
+rotate_log() {
+  local size
+  size=$(stat -c %s "$LOG_FILE" 2>/dev/null) || return 0
+  [ "$size" -gt "$LOG_MAX_BYTES" ] || return 0
+  mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || : > "$LOG_FILE"
+}
+rotate_log
 
 TXT_ERR_NO_SHELL="omarchy-shell (Quickshell) isn't running. Start your Omarchy session first."
 TXT_ERR_NO_PLUGIN="The motion-wallpaper plugin isn't loaded. Enable it: omarchy plugin enable nosignal.motion-wallpaper"

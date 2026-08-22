@@ -301,9 +301,18 @@ indefinitely. Neither may be unbounded. Four limits, in `Service.qml`:
 | `maxScreenVideos` | 64 | far above any real monitor count |
 | `maxNameLength` | 256 | connector names are short |
 
-The same limits apply to values arriving over IPC, not just from the file —
-`applySetScreenVideo` is the one that can grow the map, so it refuses a **new**
-key at the cap while still allowing an existing one to be overwritten.
+The same limits apply to values arriving over IPC, not just from the file, and
+to the `shell.json` config seed. **Clamp at every assignment site, not just the
+one that prompted the fix** — `videoPath` and `output` are each written from
+five places (state file, config seed twice, `play`, `playAll`/`setOutput`), and
+bounding only the file leaves the IPC path wide open. They now all go through
+`safePath()` / `safeName()`. `applySetScreenVideo` is the call that can grow the
+map, so it refuses a **new** key at the cap while still allowing an existing one
+to be overwritten.
+
+Confirmed against hostile IPC as well as a hostile file: a 20,005-char path to
+`play` leaves `videoPath` untouched, a 9,000-char `setOutput` lands as `"all"`,
+and a `playOn` with a 9,000-char connector name adds no entry.
 
 Verified by pointing the shell at a hostile file rather than by reading the
 code. A 1.1 MB `state.json` is refused whole (`videoPath` `""`, `output`
@@ -366,6 +375,14 @@ UI is the bar widget and its panel, so a launcher entry only duplicated the icon
 already sitting in the bar, and the hicolor icon had no other consumer — the
 widget draws a font glyph (`󰕧`), not the SVG. Both are deleted on upgrade
 rather than left to linger in the menu.
+
+### The CLI log is rotated
+
+`~/.cache/motion-wallpaper.log` collects stderr from every IPC call. A keybind
+pressed against a shell that is not running appends on **every press**, so
+unrotated it grows without limit. `rotate_log` moves it aside at 256 KB, giving
+a hard ceiling of two files. One rotation is enough — the log is only ever read
+for the most recent failure.
 
 ## Known limitations
 
