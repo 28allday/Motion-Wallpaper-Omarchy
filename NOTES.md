@@ -15,7 +15,7 @@ The repo root *is* the plugin — that is what Omarchy clones and validates.
 | `Panel.qml` | the dropdown's contents, loaded by the widget |
 | `motion-wallpaper` | CLI, a thin client over the shell IPC target |
 | `wallpaper.sh` | installer for the CLI, icon and desktop entry |
-| `icons/` | the scalable app icon |
+| `icons/` | the project mark; kept as artwork, nothing installs it |
 | `preview.jpg` | listing image; the marketplace only reads it at the ROOT |
 | `LICENSE` | MIT, matching the manifest and README |
 
@@ -263,6 +263,31 @@ security baseline and `qmllint`. Reproduce it with
 `QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 /usr/lib/qt6/bin/qml t.qml`
 — without `QT_FORCE_STDERR_LOGGING=1`, `console.log` prints nothing and the run
 looks silently broken.
+
+### What Omarchy 4 removed
+
+The plugin predates Omarchy 4 and carried three things that no longer hold.
+Worth knowing, because the same drift catches anything ported from Omarchy 3:
+
+- **Walker is not the launcher any more.** Omarchy 4 ships a native `menu`
+  shell plugin, which enumerates apps through Quickshell's `DesktopEntries`
+  (standard XDG paths, watched directly). The only two `walker` strings left
+  under `/usr/share/omarchy/shell` are the *word* in comments — a TOML walker,
+  i.e. a parser.
+- **`elephant.service` is gone with it.** It was Walker's data provider, and
+  the installer used to restart it so a new `.desktop` file showed up without a
+  re-login. There is no such unit on Omarchy 4, so the call was dead code —
+  harmless only because it was guarded by `is-active`. Dropping it also removed
+  the `service-management` capability from the marketplace security baseline.
+- **`bindd = …` in a `.conf` is dead.** Omarchy 4 reads `hyprland.lua`; user
+  keybinds go in `~/.config/hypr/bindings.lua` as
+  `o.bind("SUPER + ALT + W", "…", "…")`.
+
+**The installer no longer creates a `.desktop` entry or installs an icon.** The
+UI is the bar widget and its panel, so a launcher entry only duplicated the icon
+already sitting in the bar, and the hicolor icon had no other consumer — the
+widget draws a font glyph (`󰕧`), not the SVG. Both are deleted on upgrade
+rather than left to linger in the menu.
 
 ## Known limitations
 

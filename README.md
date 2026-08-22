@@ -31,7 +31,7 @@ omarchy plugin add https://github.com/28allday/Motion-Wallpaper-Omarchy.git --en
 
 That clones it into `~/.config/omarchy/plugins/`, enables it, and asks which bar section to put the film icon in — left, center or right (right is pre-selected). Click the icon and pick a video: that is the whole install.
 
-To also get the `motion-wallpaper` CLI (for keybinds and scripting), the Walker entry and the icon, run the installer script as well:
+To also get the `motion-wallpaper` CLI (for keybinds and scripting), run the installer script as well:
 
 ```bash
 git clone https://github.com/28allday/Motion-Wallpaper-Omarchy.git
@@ -59,8 +59,6 @@ omarchy plugin update nosignal.motion-wallpaper
 |------|---------|
 | `~/.config/omarchy/plugins/nosignal.motion-wallpaper/` | the plugin (service + bar widget + panel) |
 | `~/.local/bin/motion-wallpaper` | CLI control (keybinds / scripting) |
-| `~/.local/share/applications/motion-wallpaper.desktop` | Walker entry (toggles the wallpaper) |
-| `~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg` | icon |
 
 In your `shell.json`, enabling adds a single bar-widget entry in the section you chose. Out of the box the plugin starts with no video selected, so your normal static wallpaper is what you see until you pick a clip.
 
@@ -189,9 +187,7 @@ motion-wallpaper stop
 omarchy plugin remove nosignal.motion-wallpaper
 
 # The extras the plugin command doesn't own:
-rm -f  ~/.local/bin/motion-wallpaper \
-       ~/.local/share/applications/motion-wallpaper.desktop \
-       ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg
+rm -f  ~/.local/bin/motion-wallpaper
 rm -rf ~/.local/state/motion-wallpaper
 ```
 

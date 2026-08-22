@@ -9,8 +9,6 @@
 #
 #   ~/.config/omarchy/plugins/nosignal.motion-wallpaper/   the plugin (git clone)
 #   ~/.local/bin/motion-wallpaper                          CLI control
-#   ~/.local/share/applications/motion-wallpaper.desktop   app-menu entry
-#   ~/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg
 #
 # If you only want the plugin, skip this script entirely:
 #   omarchy plugin add https://github.com/28allday/Motion-Wallpaper-Omarchy.git --enable
@@ -25,7 +23,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ID="nosignal.motion-wallpaper"
 CLI_SRC="$SCRIPT_DIR/motion-wallpaper"
-ICON_SRC="$SCRIPT_DIR/icons/motion-wallpaper.svg"
 PLUGINS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins"
 PLUGIN_DIR="$PLUGINS_DIR/$PLUGIN_ID"
 
@@ -49,7 +46,7 @@ fi
 
 # ----- required assets --------------------------------------------------------
 for f in "$SCRIPT_DIR/manifest.json" "$SCRIPT_DIR/Service.qml" \
-         "$SCRIPT_DIR/BarWidget.qml" "$SCRIPT_DIR/Panel.qml" "$CLI_SRC" "$ICON_SRC"; do
+         "$SCRIPT_DIR/BarWidget.qml" "$SCRIPT_DIR/Panel.qml" "$CLI_SRC"; do
   [ -f "$f" ] || { echo "Missing installer asset: $f" >&2; exit 1; }
 done
 
@@ -181,34 +178,21 @@ fi
 install -D -m 755 "$CLI_SRC" "$HOME/.local/bin/motion-wallpaper"
 echo "✓ CLI installed to ~/.local/bin/motion-wallpaper"
 
-# ----- icon + desktop entry ---------------------------------------------------
-ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
-install -D -m 644 "$ICON_SRC" "$ICON_DIR/motion-wallpaper.svg"
-command -v gtk-update-icon-cache >/dev/null 2>&1 && \
-  gtk-update-icon-cache -f -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
-
-mkdir -p "$HOME/.local/share/applications"
-# The interactive UI is the bar widget + panel. This launcher is a convenience:
-# from Walker, "Motion Wallpaper" flips the video on/off (no window — it just
-# fires an IPC toggle and exits).
-cat > "$HOME/.local/share/applications/motion-wallpaper.desktop" <<EOF
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Motion Wallpaper
-Comment=Toggle the animated video wallpaper on/off
-Exec=$HOME/.local/bin/motion-wallpaper toggle
-Icon=motion-wallpaper
-Terminal=false
-Categories=Utility;Settings;DesktopSettings;
-Keywords=wallpaper;video;animated;background;motion;
-EOF
-command -v update-desktop-database >/dev/null 2>&1 && \
-  update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
-
-# Nudge Walker's data provider so the entry + icon show without a re-login.
-if systemctl --user --quiet is-active elephant.service 2>/dev/null; then
-  systemctl --user restart elephant.service || true
+# ----- clear out earlier versions' extras -------------------------------------
+# Up to v0.3.1 this installed an app-menu .desktop entry and a hicolor icon to
+# go with it. The UI is the bar widget and its panel, so a launcher entry only
+# duplicated the icon that is already in the bar; the icon had no other
+# consumer, since the widget draws a font glyph. Remove both on upgrade so they
+# do not linger in the menu.
+STALE_DESKTOP="$HOME/.local/share/applications/motion-wallpaper.desktop"
+STALE_ICON="$HOME/.local/share/icons/hicolor/scalable/apps/motion-wallpaper.svg"
+if [ -e "$STALE_DESKTOP" ] || [ -e "$STALE_ICON" ]; then
+  rm -f "$STALE_DESKTOP" "$STALE_ICON"
+  echo "  removed the app-menu entry and icon left by an earlier version"
+  command -v update-desktop-database >/dev/null 2>&1 && \
+    update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
+  command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+    gtk-update-icon-cache -f -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 fi
 
 # ----- load the plugin now ----------------------------------------------------
@@ -239,8 +223,9 @@ Two monitors? Give each its own clip:
   motion-wallpaper play ~/Videos/rain.mp4 DP-1
   motion-wallpaper off HDMI-A-1      # that one keeps the static wallpaper
 
-Optional Hyprland keybind (SUPER+W is Close window in Omarchy — avoid it):
-  bindd = SUPER ALT, W, Motion wallpaper, exec, motion-wallpaper toggle
+Optional keybind — Omarchy 4 keeps user binds in ~/.config/hypr/bindings.lua
+(SUPER+W is Close window in Omarchy, so avoid it):
+  o.bind("SUPER + ALT + W", "Motion wallpaper", "motion-wallpaper toggle")
 
 Updating later:  omarchy plugin update $PLUGIN_ID
 Removing:        omarchy plugin remove $PLUGIN_ID

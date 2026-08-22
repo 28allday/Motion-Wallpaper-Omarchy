@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "nosignal.motion-wallpaper",
   "name": "Motion Wallpaper",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": "Gavin Nugent",
   "license": "MIT",
   "description": "Native looping video wallpaper for omarchy-shell. Renders a muted, looping video on the background layer above the static wallpaper, with a different clip per monitor if you want one, and auto-pause on fullscreen. Controlled from its bar widget, or from a terminal with the motion-wallpaper CLI.",
