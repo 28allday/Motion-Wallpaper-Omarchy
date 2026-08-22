@@ -243,12 +243,34 @@ The shell is long-lived, so nothing the panel does may scale with the size of
   delegate, so the enclosing `Flickable` bounded what you could *see* and not
   what existed.
 
-Both are bounded now. `find | sort -u | head -n <scanLimit + 1>` caps the
-output and closes the pipe, so `find` is killed rather than walking a huge
-directory to the end; asking for one line past the cap is what makes "there are
-more" detectable without a second scan. The list is a `ListView`, which recycles
-delegates, so live objects track the height of the list rather than the library.
-The "off" row rides along as the ListView `header`.
+Both are bounded now, and **where the `head` sits is the whole point**. It has
+to be DIRECTLY after each `find`:
+
+```sh
+find "$d" … | head -n "$lim"     # find dies of SIGPIPE at the cap
+done | sort -u | head -n "$lim"  # sort now sees two capped chunks
+```
+
+A `sort -u` *between* `find` and `head` is a full barrier: it must consume the
+entire library before it emits its first line, so `find` runs to completion
+however small the cap is, and the sort's own temporary storage is unbounded
+too. Measured on a 20,000-file directory with a cap of 501, counting what
+`find` actually emitted (`-fprintf` to a log, which stops when it dies):
+
+| pipeline | entries `find` emitted | wall |
+|---|---|---|
+| `find \| sort -u \| head` | **20,000 of 20,000** | ~19 ms |
+| `find \| head \| sort -u \| head` | **945 of 20,000** | ~9 ms |
+
+The 945 rather than 501 is one stdio block of over-read before the signal
+lands. What stays unbounded is reading the directory itself — `find` must look
+at entries to know which match, so a folder of a million non-videos is still
+one large readdir; `-maxdepth 1` keeps that to a single directory, not a tree.
+
+Asking for one line past the cap is what makes "there are more" detectable
+without a second scan. The list is a `ListView`, which recycles delegates, so
+live objects track the height of the list rather than the library. The "off"
+row rides along as the ListView `header`.
 
 Measured on this box with 3000 clips in `~/Videos`, RSS of the `quickshell`
 process before and after opening the panel:
@@ -263,6 +285,31 @@ CLI takes an arbitrary path — `motion-wallpaper play <path>` plays a clip the
 list never showed, which is what the truncation note tells the user. Reset
 `videosTruncated` at the top of every scan or the note outlives the library that
 earned it.
+
+### state.json is untrusted input
+
+`~/.local/state/motion-wallpaper/state.json` is writable by anything running as
+this user, and the shell that reads it never exits. So it is untrusted in
+*size* as much as in content: a path out of it becomes a process argument, and
+a `screenVideos` key is deliberately retained for a disconnected monitor
+indefinitely. Neither may be unbounded. Four limits, in `Service.qml`:
+
+| limit | value | why |
+|---|---|---|
+| `maxStateBytes` | 256 KB | checked **before** `JSON.parse`, which would otherwise build the whole tree in the shell's heap before any per-field limit could apply |
+| `maxPathLength` | 4096 | `PATH_MAX`; anything longer is not a path |
+| `maxScreenVideos` | 64 | far above any real monitor count |
+| `maxNameLength` | 256 | connector names are short |
+
+The same limits apply to values arriving over IPC, not just from the file —
+`applySetScreenVideo` is the one that can grow the map, so it refuses a **new**
+key at the cap while still allowing an existing one to be overwritten.
+
+Verified by pointing the shell at a hostile file rather than by reading the
+code. A 1.1 MB `state.json` is refused whole (`videoPath` `""`, `output`
+`"all"`, `screenVideos` `{}`). One crafted to sit *under* the byte cap, so the
+per-field limits have to do the work, lands as: `videoPath` 10,005 chars → 0,
+`output` 5,000 chars → `"all"`, `screenVideos` 3,000 entries → 64.
 
 ### Hostile clip names
 

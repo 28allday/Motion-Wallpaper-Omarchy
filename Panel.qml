@@ -141,18 +141,33 @@ Item {
     }
   }
 
-  // The shell process is long-lived, so neither this buffer nor the list it
-  // feeds may grow with the size of the user's video folder. `head` caps the
-  // output and closes the pipe, so `find` is killed rather than walking a
-  // huge directory to completion. One extra line is requested so that
-  // "more than the cap" is detectable without a second scan.
+  // The shell process is long-lived, so nothing here may grow with the size of
+  // the user's video folder — not the buffer, not the list, and not the scan
+  // itself.
+  //
+  // `head` sits DIRECTLY after each `find`, not after the `sort`. A `sort` in
+  // between would have to consume the whole library before emitting its first
+  // line, so `find` would run to completion however small the cap was, and the
+  // sort's own temporary storage would be unbounded too. Downstream of `find`,
+  // `head` exits at the cap and `find` dies of SIGPIPE on its next write, so
+  // the traversal stops early; `sort -u` then sees at most two capped chunks.
+  //
+  // What stays unbounded is reading the directory itself: `find` must look at
+  // entries to know which ones match, so a folder with a million non-videos is
+  // still one large readdir. `-maxdepth 1` keeps that to a single directory
+  // rather than a tree.
+  //
+  // One line past the cap is requested so "there are more" is detectable
+  // without a second scan.
   Process {
     id: scanProc
     command: ["bash", "-c",
+      "lim=" + (panel.scanLimit + 1) + "; " +
       "for d in \"$HOME/Videos/Wallpapers\" \"$HOME/Videos\"; do " +
       "[ -d \"$d\" ] && find \"$d\" -maxdepth 1 -type f " +
-      "\\( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.mov' -o -iname '*.avi' \\); " +
-      "done | sort -u | head -n " + (panel.scanLimit + 1)]
+      "\\( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.mov' -o -iname '*.avi' \\) " +
+      "2>/dev/null | head -n \"$lim\"; " +
+      "done | sort -u | head -n \"$lim\""]
     stdout: StdioCollector {
       onStreamFinished: {
         var seen = ({})

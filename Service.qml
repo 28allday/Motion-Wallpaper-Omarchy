@@ -63,6 +63,29 @@ Item {
     return (v === undefined || v === null) ? fallback : v
   }
 
+  // ------------------------------------------------------------- bounds
+  // state.json lives under ~/.local/state, so it is writable by anything
+  // running as this user, and the shell that reads it never exits. Every value
+  // taken from it (or from the shell.json config entry, or from IPC) is
+  // therefore treated as untrusted *size* as well as untrusted content: a
+  // path becomes a process argument and a screenVideos key is retained for a
+  // disconnected monitor indefinitely, so neither may be unbounded.
+  readonly property int maxStateBytes: 262144   // refuse to parse a larger state file
+  readonly property int maxPathLength: 4096     // PATH_MAX; longer is not a real path
+  readonly property int maxScreenVideos: 64     // far above any real monitor count
+  readonly property int maxNameLength: 256      // connector names are short
+
+  // Clamp a value to a sane path string, or "" if it cannot be one.
+  function safePath(v) {
+    if (v === null || v === undefined) return ""
+    var t = String(v)
+    if (t.length > root.maxPathLength) {
+      console.warn("motion-wallpaper: ignoring a path of", t.length, "chars")
+      return ""
+    }
+    return t
+  }
+
   // ---------------------------------------------------------------- state
   // Runtime truth for videoPath + enabled + output + pauseOnFullscreen.
   // Seeded from the shell.json config entry on first run (and re-seeded when
@@ -229,11 +252,16 @@ Item {
   function normalizeScreenVideos(v) {
     var out = ({})
     if (!v || typeof v !== "object" || Array.isArray(v)) return out
+    var n = 0
     for (var k in v) {
       var name = String(k).trim()
-      if (name === "") continue
-      var p = v[k]
-      out[name] = (p === null || p === undefined) ? "" : String(p)
+      if (name === "" || name.length > root.maxNameLength) continue
+      if (n >= root.maxScreenVideos) {
+        console.warn("motion-wallpaper: screenVideos truncated at", root.maxScreenVideos, "entries")
+        break
+      }
+      out[name] = root.safePath(v[k])
+      n++
     }
     return out
   }
@@ -241,13 +269,22 @@ Item {
   function applyStateText(txt) {
     var t = String(txt || "").trim()
     if (!t) return false
+    // Refuse an oversized file rather than handing it to JSON.parse, which
+    // would build the whole tree in the shell's heap before any of the
+    // per-field limits below could apply.
+    if (t.length > root.maxStateBytes) {
+      console.warn("motion-wallpaper: state.json is", t.length,
+                   "bytes, over the", root.maxStateBytes, "limit - ignoring it")
+      return false
+    }
     try {
       var o = JSON.parse(t)
       if (o && typeof o === "object") {
-        if (o.videoPath !== undefined) root.videoPath = String(o.videoPath || "")
+        if (o.videoPath !== undefined) root.videoPath = root.safePath(o.videoPath)
         if (o.enabled !== undefined) root.enabled = (o.enabled === true || String(o.enabled) === "true")
         if (o.output !== undefined) {
-          root.output = String(o.output || "all") || "all"
+          var ov = String(o.output || "all")
+          root.output = (ov.length > root.maxNameLength || ov === "") ? "all" : ov
           root._stateHadOutput = true
         }
         if (o.pauseOnFullscreen !== undefined) {
@@ -679,10 +716,17 @@ Item {
   function applySetScreenVideo(name, path) {
     var n = String(name || "").trim()
     if (n === "" || n === "all") return root.applyPlayAll(path)
-    var p = String(path || "").trim()
+    if (n.length > root.maxNameLength) return root.statusObject()
+    var p = root.safePath(String(path || "").trim())
     var m = ({})
     var sv = root.screenVideos || ({})
     for (var k in sv) m[k] = sv[k]
+    // Adding a NEW key is what can grow the map without limit; overwriting an
+    // existing one cannot, so it stays allowed at the cap.
+    if (!m.hasOwnProperty(n) && Object.keys(m).length >= root.maxScreenVideos) {
+      console.warn("motion-wallpaper: refusing a new screen entry at the", root.maxScreenVideos, "cap")
+      return root.statusObject()
+    }
     m[n] = p
     root.screenVideos = m
     if (p !== "") {                 // assigning a clip implies "play it"
