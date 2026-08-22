@@ -58,12 +58,22 @@ Item {
   readonly property bool hasSvc: !!service
   // The clip assigned to whatever the scope is — the default clip for "all",
   // otherwise that screen's own (falling back to the default it inherits).
+  // Clip names come off disk, so they are hostile input, and Qt's Text
+  // defaults to Text.AutoText — a name that looks like markup gets parsed as
+  // rich text, and an <img src="…"> in it is fetched as a resource. Our own
+  // Text elements all set textFormat: Text.PlainText. These two labels are
+  // drawn by the shell's own kit (PanelHero, Dropdown), whose Text we do not
+  // control, so the angle brackets are stripped before they reach it.
+  function plainName(s) {
+    return String(s).replace(/[<>]/g, "")
+  }
+
   readonly property string videoPath: {
     if (!service) return ""
     if (scope === "all") return String(service.videoPath || "")
     return String(service.configuredPathForScreen(scope) || "")
   }
-  readonly property string videoName: videoPath !== "" ? videoPath.split("/").pop() : ""
+  readonly property string videoName: videoPath !== "" ? plainName(videoPath.split("/").pop()) : ""
   readonly property bool videoExists: !!service && videoPath !== "" && service.pathExists(videoPath)
   readonly property string stateText: {
     if (!service) return "Service unavailable"
@@ -93,7 +103,7 @@ Item {
     for (var i = 0; i < s.length; i++) {
       var n = String(s[i].name)
       var p = service ? String(service.configuredPathForScreen(n) || "") : ""
-      o.push({ value: n, label: n + " · " + (p === "" ? "off" : p.split("/").pop()) })
+      o.push({ value: n, label: n + " · " + (p === "" ? "off" : plainName(p.split("/").pop())) })
     }
     return o
   }
@@ -170,6 +180,7 @@ Item {
       fontFamily: panel.fontFamily
       iconComponent: Component {
         Text {
+          textFormat: Text.PlainText
           text: "󰕧"
           color: panel.widget ? panel.widget.iconColor : panel.fg
           font.family: panel.fontFamily
@@ -219,6 +230,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       visible: panel.multiScreen && panel.scope === "all" && panel.screensDiffer
       width: parent.width
       text: "Screens are set individually — pick one above to change just it."
@@ -250,6 +262,7 @@ Item {
 
     // Empty-dir hint.
     Text {
+      textFormat: Text.PlainText
       visible: panel.videos.length === 0
       width: parent.width
       text: "Drop clips in ~/Videos"
@@ -290,6 +303,7 @@ Item {
             : (offMouse.containsMouse ? Style.hoverFillFor(panel.fg, Color.accent) : "transparent")
 
           Text {
+            textFormat: Text.PlainText
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
@@ -328,6 +342,7 @@ Item {
               : (rowMouse.containsMouse ? Style.hoverFillFor(panel.fg, Color.accent) : "transparent")
 
             Text {
+              textFormat: Text.PlainText
               anchors.left: parent.left
               anchors.right: playMark.left
               anchors.verticalCenter: parent.verticalCenter
@@ -342,6 +357,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               id: playMark
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter

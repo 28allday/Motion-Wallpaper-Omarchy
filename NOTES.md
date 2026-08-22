@@ -233,6 +233,37 @@ are easy to get wrong:
   re-places it once after an unattended install. The interactive path is
   unaffected — the placement prompt reads the manifest file directly.
 
+### Hostile clip names
+
+Clip names come off disk, so they are attacker-controlled — a file dropped in
+`~/Videos` (or arriving on someone else's camera card) can be named anything.
+QML `Text` defaults to `Text.AutoText`, which runs Qt's `mightBeRichText()`
+heuristic and silently switches to rich text when the string looks like markup;
+an `<img src="http://host/x.png">` in a filename is then **parsed and fetched
+as a resource**. Measured on a name carrying `width="300" height="120"`:
+
+| rendering | resolved format | `contentHeight` |
+|---|---|---|
+| `AutoText` (default) | rich text | 120 — the attacker's own value |
+| `textFormat: Text.PlainText` | plain | 19 — one line of literal characters |
+| angle brackets stripped | plain | 19 |
+
+Two defences, because there are two kinds of sink:
+
+- **Every `Text` in this plugin sets `textFormat: Text.PlainText`** — all of
+  them, not just the ones that currently take a filename, so anything added
+  later inherits the safe default.
+- **`plainName()` strips `<` and `>`** from the name before it is handed to
+  `PanelHero.meta` or a `Dropdown` label. Those are drawn by the shell's own
+  kit, whose `Text` elements are bare `AutoText` and are not ours to change, so
+  the string has to be safe before it crosses over.
+
+No tool catches this: it passes `omarchy plugin validate`, the marketplace
+security baseline and `qmllint`. Reproduce it with
+`QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 /usr/lib/qt6/bin/qml t.qml`
+— without `QT_FORCE_STDERR_LOGGING=1`, `console.log` prints nothing and the run
+looks silently broken.
+
 ## Known limitations
 
 - Decoding runs continuously on the GPU. Auto-pause covers fullscreen windows;
