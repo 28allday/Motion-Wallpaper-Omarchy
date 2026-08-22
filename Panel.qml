@@ -122,6 +122,10 @@ Item {
   }
 
   // ---- video discovery ---------------------------------------------------
+  // Hard cap on how many clips the panel will hold and draw. The CLI takes an
+  // arbitrary path, so nothing becomes unreachable by capping the browser.
+  readonly property int scanLimit: 500
+  property bool videosTruncated: false
   property var videos: []   // [{ path, name }]
 
   function rescan() { scanProc.running = true }
@@ -137,22 +141,29 @@ Item {
     }
   }
 
+  // The shell process is long-lived, so neither this buffer nor the list it
+  // feeds may grow with the size of the user's video folder. `head` caps the
+  // output and closes the pipe, so `find` is killed rather than walking a
+  // huge directory to completion. One extra line is requested so that
+  // "more than the cap" is detectable without a second scan.
   Process {
     id: scanProc
     command: ["bash", "-c",
       "for d in \"$HOME/Videos/Wallpapers\" \"$HOME/Videos\"; do " +
       "[ -d \"$d\" ] && find \"$d\" -maxdepth 1 -type f " +
       "\\( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.mov' -o -iname '*.avi' \\); " +
-      "done | sort -u"]
+      "done | sort -u | head -n " + (panel.scanLimit + 1)]
     stdout: StdioCollector {
       onStreamFinished: {
         var seen = ({})
         var list = []
+        panel.videosTruncated = false
         var lines = String(text || "").split("\n")
         for (var i = 0; i < lines.length; i++) {
           var p = lines[i].trim()
           if (!p || seen[p]) continue
           seen[p] = true
+          if (list.length >= panel.scanLimit) { panel.videosTruncated = true; break }
           list.push({ path: p, name: p.split("/").pop() })
         }
         panel.videos = list
@@ -272,33 +283,39 @@ Item {
       wrapMode: Text.WordWrap
     }
 
-    Flickable {
-      id: videoFlick
+    // A ListView, not a Column of Repeater rows: it recycles delegates, so the
+    // number of live QML objects tracks the height of this list and not the
+    // size of the library. The "off" row rides along as the header so it
+    // scrolls with the clips instead of being pinned above them.
+    ListView {
+      id: videoList
       visible: panel.videos.length > 0 || panel.scope !== "all"
       width: parent.width
-      height: Math.min(videoList.implicitHeight, Style.space(240))
-      contentWidth: width
-      contentHeight: videoList.implicitHeight
+      height: Math.min(contentHeight, Style.space(240))
       clip: true
+      spacing: Style.spacing.xxs
       boundsBehavior: Flickable.StopAtBounds
       interactive: contentHeight > height
       ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+      model: panel.videos
 
-      Column {
-        id: videoList
-        width: parent.width
-        spacing: Style.spacing.xxs
+      // Blank just this screen. Only offered when one screen is scoped —
+      // the global equivalent is the Stop button.
+      header: Rectangle {
+        id: offRow
+        visible: panel.scope !== "all"
+        readonly property bool current: panel.videoPath === ""
+        width: videoList.width
+        height: visible ? Style.spacing.controlHeight + videoList.spacing : 0
+        color: "transparent"
 
-        // Blank just this screen. Only offered when one screen is scoped —
-        // the global equivalent is the Stop button.
         Rectangle {
-          id: offRow
-          visible: panel.scope !== "all"
-          readonly property bool current: panel.videoPath === ""
-          width: videoList.width
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
           height: Style.spacing.controlHeight
           radius: Style.cornerRadius
-          color: current
+          color: offRow.current
             ? Style.selectedFillFor(panel.fg, Color.accent)
             : (offMouse.containsMouse ? Style.hoverFillFor(panel.fg, Color.accent) : "transparent")
 
@@ -325,64 +342,73 @@ Item {
             onClicked: if (panel.widget) panel.widget.offScreen(panel.scope)
           }
         }
+      }
 
-        Repeater {
-          model: panel.videos
+      delegate: Rectangle {
+        id: vrow
+        required property var modelData
+        required property int index
+        readonly property bool current: modelData.path === panel.videoPath
+        width: videoList.width
+        height: Style.spacing.controlHeight
+        radius: Style.cornerRadius
+        color: current
+          ? Style.selectedFillFor(panel.fg, Color.accent)
+          : (rowMouse.containsMouse ? Style.hoverFillFor(panel.fg, Color.accent) : "transparent")
 
-          Rectangle {
-            id: vrow
-            required property var modelData
-            required property int index
-            readonly property bool current: modelData.path === panel.videoPath
-            width: videoList.width
-            height: Style.spacing.controlHeight
-            radius: Style.cornerRadius
-            color: current
-              ? Style.selectedFillFor(panel.fg, Color.accent)
-              : (rowMouse.containsMouse ? Style.hoverFillFor(panel.fg, Color.accent) : "transparent")
+        Text {
+          textFormat: Text.PlainText
+          anchors.left: parent.left
+          anchors.right: playMark.left
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: Style.spacing.controlPaddingX
+          anchors.rightMargin: Style.spacing.sm
+          text: vrow.modelData.name
+          color: vrow.current ? Style.selectedStateColor(panel.fg, Color.accent) : panel.fg
+          font.family: panel.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: vrow.current
+          elide: Text.ElideMiddle
+        }
 
-            Text {
-              textFormat: Text.PlainText
-              anchors.left: parent.left
-              anchors.right: playMark.left
-              anchors.verticalCenter: parent.verticalCenter
-              anchors.leftMargin: Style.spacing.controlPaddingX
-              anchors.rightMargin: Style.spacing.sm
-              text: vrow.modelData.name
-              color: vrow.current ? Style.selectedStateColor(panel.fg, Color.accent) : panel.fg
-              font.family: panel.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: vrow.current
-              elide: Text.ElideMiddle
-            }
+        Text {
+          textFormat: Text.PlainText
+          id: playMark
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.rightMargin: Style.spacing.controlPaddingX
+          visible: vrow.current
+          text: panel.isPaused ? "󰏤" : "󰐊"
+          color: Style.selectedStateColor(panel.fg, Color.accent)
+          font.family: panel.fontFamily
+          font.pixelSize: Style.font.body
+        }
 
-            Text {
-              textFormat: Text.PlainText
-              id: playMark
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              anchors.rightMargin: Style.spacing.controlPaddingX
-              visible: vrow.current
-              text: panel.isPaused ? "󰏤" : "󰐊"
-              color: Style.selectedStateColor(panel.fg, Color.accent)
-              font.family: panel.fontFamily
-              font.pixelSize: Style.font.body
-            }
-
-            MouseArea {
-              id: rowMouse
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: {
-                if (!panel.widget) return
-                if (panel.scope === "all") panel.widget.playAll(vrow.modelData.path)
-                else panel.widget.playPathOn(panel.scope, vrow.modelData.path)
-              }
-            }
+        MouseArea {
+          id: rowMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: {
+            if (!panel.widget) return
+            if (panel.scope === "all") panel.widget.playAll(vrow.modelData.path)
+            else panel.widget.playPathOn(panel.scope, vrow.modelData.path)
           }
         }
       }
+    }
+
+    // Says so when the library is larger than the scan cap, rather than
+    // silently pretending the extra clips are not there.
+    Text {
+      textFormat: Text.PlainText
+      visible: panel.videosTruncated
+      width: parent.width
+      text: "Showing the first " + panel.scanLimit + " clips. Play others with: motion-wallpaper play <path>"
+      color: panel.dim
+      font.family: panel.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      wrapMode: Text.WordWrap
     }
   }
 }

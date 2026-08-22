@@ -233,6 +233,37 @@ are easy to get wrong:
   re-places it once after an unattended install. The interactive path is
   unaffected — the placement prompt reads the manifest file directly.
 
+### Large video libraries
+
+The shell is long-lived, so nothing the panel does may scale with the size of
+`~/Videos`. Two things used to:
+
+- the scan's `StdioCollector` buffered the **entire** `find` output;
+- a `Repeater` instantiated **one row per result** — a `Repeater` builds every
+  delegate, so the enclosing `Flickable` bounded what you could *see* and not
+  what existed.
+
+Both are bounded now. `find | sort -u | head -n <scanLimit + 1>` caps the
+output and closes the pipe, so `find` is killed rather than walking a huge
+directory to the end; asking for one line past the cap is what makes "there are
+more" detectable without a second scan. The list is a `ListView`, which recycles
+delegates, so live objects track the height of the list rather than the library.
+The "off" row rides along as the ListView `header`.
+
+Measured on this box with 3000 clips in `~/Videos`, RSS of the `quickshell`
+process before and after opening the panel:
+
+| build | RSS delta on open |
+|---|---|
+| `Repeater`, uncapped scan | **+57 MB**, retained by the shell |
+| `ListView`, capped scan | **+6 MB** |
+
+`scanLimit` is 500. Capping the *browser* costs nothing in reach, because the
+CLI takes an arbitrary path — `motion-wallpaper play <path>` plays a clip the
+list never showed, which is what the truncation note tells the user. Reset
+`videosTruncated` at the top of every scan or the note outlives the library that
+earned it.
+
 ### Hostile clip names
 
 Clip names come off disk, so they are attacker-controlled — a file dropped in
