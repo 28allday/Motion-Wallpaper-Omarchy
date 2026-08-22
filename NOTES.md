@@ -16,6 +16,8 @@ The repo root *is* the plugin — that is what Omarchy clones and validates.
 | `motion-wallpaper` | CLI, a thin client over the shell IPC target |
 | `wallpaper.sh` | installer for the CLI, icon and desktop entry |
 | `icons/` | the scalable app icon |
+| `preview.jpg` | listing image; the marketplace only reads it at the ROOT |
+| `LICENSE` | MIT, matching the manifest and README |
 
 ## Architecture
 
@@ -175,6 +177,14 @@ are easy to get wrong:
   already enables both the bar widget and the service. A duplicate only makes
   `omarchy plugin disable` take two runs to clear. The `plugins[]` entry remains
   the place for *settings*, which is a separate thing.
+- **The marketplace preview asset must be `preview.*` at the repo ROOT.** The
+  catalog builder matches `preview.png|webp|jpg|jpeg|avif` there and nowhere
+  else — a `docs/` or `screenshots/` folder is not detected, however the README
+  links it. Ship exactly one: when several match, the extension order above
+  decides, so a stale `preview.png` would quietly outrank a newer `.jpg`. The
+  card renders at 720px and the detail view at 1600px, which is why the source
+  screenshot is downscaled to 1600 wide rather than shipped full size.
+
 - **The panel is not a `panel` kind.** It is a `Loader` inside the bar widget,
   the same mechanism the first-party audio and bluetooth widgets use. The `panel`
   kind is for independently summoned floating windows.
@@ -225,9 +235,5 @@ are easy to get wrong:
 
 ## Known limitations
 
-- Per-monitor clips and the `output` selector beyond `"all"` are implemented and
-  applied live, but the dev box has one output — the multi-monitor paths
-  (a different clip per screen, blanking one screen, hot-plug) still want a
-  hardware pass on a two-monitor setup.
 - Decoding runs continuously on the GPU. Auto-pause covers fullscreen windows;
   on battery, stopping or using a shorter, lower-bitrate clip is the bigger win.
