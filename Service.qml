@@ -386,7 +386,7 @@ Item {
     stdout: StdioCollector {
       onStreamFinished: {
         stateReadFallback.stop()
-        root.finishStateLoad(text())
+        root.finishStateLoad(text)
       }
     }
     // A bail-out still has to answer: `_stateLoaded` gates the whole service,
