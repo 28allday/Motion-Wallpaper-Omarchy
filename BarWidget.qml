@@ -68,6 +68,34 @@ BarWidget {
     if (service) service.applySetScreenVideo(screen, "")
     else ipc("playOn", screen, "")
   }
+  // ---- scoped playback: "" / "all" = global, else one connector ----------
+  function togglePlayPauseScoped(scope) {
+    var sc = String(scope || "")
+    if (sc === "" || sc === "all") { togglePlayPause(); return }
+    if (!service) { ipc("toggleOnScreen", sc); return }
+    if (service.offFor(sc)) service.applyPlayScreen(sc)
+    else if (service.pausedFor(sc)) service.applyResumeScreen(sc)
+    else service.applyPauseScreen(sc)
+  }
+  function stopScoped(scope) {
+    var sc = String(scope || "")
+    if (sc === "" || sc === "all") { stopPlayback(); return }
+    if (service) service.applyStopScreen(sc)
+    else ipc("stopOnScreen", sc)
+  }
+  function setSpeedScoped(v, scope) {
+    var sc = String(scope || "")
+    if (sc === "" || sc === "all") { setSpeed(v); return }
+    if (service) service.applySetSpeedOn(sc, v)
+    else ipc("setSpeedOn", sc, String(v))
+  }
+  function followGlobalPlayback(scope) {
+    var sc = String(scope || "")
+    if (sc === "" || sc === "all") return
+    if (service) service.applyClearScreenPlayback(sc)
+    else ipc("followGlobalPlayback", sc)
+  }
+
   function togglePlayPause() {
     if (!service) { ipc("toggle"); return }
     if (!service.enabled) { service.applyPlay(""); return }
@@ -81,6 +109,35 @@ BarWidget {
   function setOutput(name) {
     if (service) service.applySetOutput(name)
     else ipc("setOutput", name)
+  }
+  function setSpeed(v) {
+    if (service) service.applySetSpeed(v)
+    else ipc("setSpeed", String(v))
+  }
+  // scope is "" / "all" for the global defaults, or a connector name.
+  function setRotation(mode, order, minutes, scope) {
+    var sc = String(scope || "")
+    if (service) service.applySetRotation(mode, order, minutes, sc)
+    else if (sc === "" || sc === "all") ipc("setRotation", String(mode), String(order), String(minutes))
+    else ipc("setRotationOn", sc, String(mode), String(order), String(minutes))
+  }
+  function setPlaylist(paths, scope) {
+    var sc = String(scope || "")
+    if (service) service.applySetPlaylist(paths, sc)
+    else if (sc === "" || sc === "all") ipc("setPlaylist", (paths || []).join(":"))
+    else ipc("setPlaylistOn", sc, (paths || []).join(":"))
+  }
+  function clearRotation(scope) {
+    var sc = String(scope || "")
+    if (sc === "" || sc === "all") return
+    if (service) service.applyClearScreenRotation(sc)
+    else ipc("clearRotationOn", sc)
+  }
+  function nextVideo(scope) {
+    var sc = String(scope || "")
+    if (service) service.applyNextVideo(sc)
+    else if (sc === "" || sc === "all") ipc("next")
+    else ipc("nextOn", sc)
   }
   function setPauseOnFullscreen(on) {
     if (service) service.applySetPauseOnFullscreen(on ? "true" : "false")

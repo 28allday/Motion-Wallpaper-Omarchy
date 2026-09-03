@@ -125,6 +125,41 @@ Item {
   // monitor stays on the static wallpaper. Keys for disconnected monitors are
   // kept, so a screen gets its clip back when it is plugged in again.
   property var screenVideos: ({})
+
+  // ------------------------------------------------- speed + rotation state
+  // Playback speed multiplier applied to every surface. Free anywhere in the
+  // range at 2-decimal precision (0.66, 0.99, 1.37 ...) — clamped rather than
+  // snapped, so a hand-edited state.json still cannot drive the decoder
+  // somewhere absurd.
+  readonly property real minSpeed: 0.25
+  readonly property real maxSpeed: 2.0
+  property real playbackSpeed: 1.0
+
+  // Rotation is OFF by default: with rotationMode "off" this plugin behaves
+  // exactly as it did before — one clip, chosen by hand, until it is changed.
+  //   "off"      one clip (videoPath / screenVideos), never changes on its own
+  //   "all"      cycle every clip found in the library
+  //   "selected" cycle only the clips in `playlist`
+  property string rotationMode: "off"
+  property string rotationOrder: "shuffle"   // "shuffle" | "sequential"
+  property int rotationInterval: 10          // minutes between changes
+  property var playlist: []                  // paths, used when mode is "selected"
+
+  readonly property int maxPlaylist: 500     // matches the library scan cap
+  readonly property int minInterval: 1
+  readonly property int maxInterval: 60
+
+  // Per-monitor rotation position: each screen keeps its own cursor and clip.
+  // Ephemeral - not persisted, re-seeded on start.
+  // Per-screen overrides: { "DP-1": { mode, order, interval, playlist,
+  // speed, off, paused } }. A screen with no entry follows the globals above.
+  // The first four are rotation; speed/off/paused are that screen's own
+  // playback, so a monitor can be stopped or slowed on its own.
+  property var screenRotation: ({})
+
+  property var rotCurrent: ({})   // connector -> path showing right now
+  property var rotCursor: ({})    // connector -> index into rotationPool
+
   property bool _stateLoaded: false
   property bool _stateHadOutput: false  // state.json carried an explicit output
   property bool _stateHadPause: false   // state.json carried an explicit pauseOnFullscreen
@@ -154,10 +189,27 @@ Item {
   // (never a black or frozen frame). With per-monitor clips there can be
   // several paths in play, so one process checks them all in a batch.
   property var existingPaths: ({})
+  property var statedPaths: ({})   // paths the stat has actually examined
+
+  // The scan already ran `[ -f ]` on each entry, so these are known-good
+  // without waiting on the async stat below - which would otherwise blank the
+  // surface for a frame every time rotation swapped in a library clip.
+  readonly property var libraryPaths: {
+    var set = ({})
+    var av = root.availableVideos || []
+    for (var i = 0; i < av.length; i++) set[resolvePath(av[i].path)] = true
+    return set
+  }
 
   function pathExists(p) {
     var r = resolvePath(p)
-    return r !== "" && root.existingPaths[r] === true
+    if (r === "") return false
+    if (root.existingPaths[r] === true) return true
+    // The scan is a fallback for paths the stat has not covered yet. Once the
+    // stat has actually looked at a path and not found it, the stat wins —
+    // otherwise a clip deleted after the last scan keeps reporting as present
+    // for up to the rescan interval.
+    return root.libraryPaths[r] === true && root.statedPaths[r] !== true
   }
 
   // Every path the current state could render, resolved and deduplicated.
@@ -173,6 +225,21 @@ Item {
     add(root.videoPath)
     var sv = root.screenVideos || ({})
     for (var k in sv) add(sv[k])
+    // The rotation playlist has to be stat'd as well: rotationPool filters on
+    // pathExists(), so leaving these out makes every chosen clip look missing
+    // and the pool comes back empty.
+    var pl = root.playlist || []
+    for (var i = 0; i < pl.length; i++) add(pl[i])
+    // ...and every per-screen playlist, for the same reason.
+    var sr = root.screenRotation || ({})
+    for (var sk in sr) {
+      var spl = (sr[sk] && sr[sk].playlist) || []
+      for (var si = 0; si < spl.length; si++) add(spl[si])
+    }
+    // Whatever rotation is showing right now, so a clip deleted mid-cycle is
+    // noticed rather than trusted forever from the last scan.
+    var rc = root.rotCurrent || ({})
+    for (var rk in rc) add(rc[rk])
     return out
   }
 
@@ -180,6 +247,9 @@ Item {
     var paths = candidatePaths()
     if (paths.length === 0) { root.existingPaths = ({}); return }
     if (statProc.running) { statDebounce.restart(); return }
+    var asked = ({})
+    for (var i = 0; i < paths.length; i++) asked[paths[i]] = true
+    statProc.asked = asked
     statProc.command = root.timeoutPrefix.concat(
       ["bash", "-c", 'for p in "$@"; do [ -f "$p" ] && printf "%s\\n" "$p"; done', "_"]).concat(paths)
     statProc.running = true
@@ -187,9 +257,16 @@ Item {
 
   onVideoPathChanged: checkVideoFiles()
   onScreenVideosChanged: checkVideoFiles()
+  onPlaylistChanged: checkVideoFiles()
+  onRotCurrentChanged: checkVideoFiles()
 
   Process {
     id: statProc
+    // What this run was asked about. Published only once the run finishes, so
+    // statedPaths means what its name says; setting it at request time made
+    // pathExists() reject a path the stat had not looked at yet, dropping the
+    // surface for the round trip.
+    property var asked: ({})
     stdout: StdioCollector {
       onStreamFinished: {
         var set = ({})
@@ -199,6 +276,7 @@ Item {
           if (p) set[p] = true
         }
         root.existingPaths = set
+        root.statedPaths = statProc.asked
       }
     }
   }
@@ -213,6 +291,315 @@ Item {
   // Kept for the panel, the bar icon and the CLI: does the DEFAULT clip exist.
   readonly property bool videoFileExists: pathExists(videoPath)
 
+  // ------------------------------------------------ speed + rotation helpers
+  // Clamp into range and round to 2 decimals. Rounding keeps the persisted
+  // value tidy and stops a drag from writing 0.6600000000000001.
+  function safeSpeed(v) {
+    var n = Number(v)
+    if (!isFinite(n) || n <= 0) return 1.0
+    n = Math.max(root.minSpeed, Math.min(root.maxSpeed, n))
+    return Math.round(n * 100) / 100
+  }
+
+  function safeMode(v) {
+    var m = String(v || "")
+    return (m === "all" || m === "selected") ? m : "off"
+  }
+
+  function safeOrder(v) {
+    return String(v || "") === "sequential" ? "sequential" : "shuffle"
+  }
+
+  function safeInterval(v) {
+    var n = Math.round(Number(v))
+    if (!isFinite(n)) return 10
+    return Math.max(root.minInterval, Math.min(root.maxInterval, n))
+  }
+
+  // Same defensive shape as normalizeScreenVideos: a flat array of real paths,
+  // capped, deduplicated, anything else dropped rather than trusted.
+  function normalizePlaylist(v) {
+    var out = []
+    if (!v || typeof v !== "object" || typeof v.length !== "number") return out
+    var seen = ({})
+    for (var i = 0; i < v.length && out.length < root.maxPlaylist; i++) {
+      var p = root.safePath(v[i])
+      if (p === "" || Object.prototype.hasOwnProperty.call(seen, p)) continue
+      seen[p] = true
+      out.push(p)
+    }
+    return out
+  }
+
+  // Accept only { connector: { mode, order, interval, playlist } }; every field
+  // is run through the same validators as the globals, and anything unexpected
+  // is dropped rather than allowed to reach the render rule.
+  function safeBool(v) { return v === true || String(v) === "true" }
+
+  function normalizeScreenRotation(v) {
+    var out = ({})
+    if (!v || typeof v !== "object") return out
+    var n = 0
+    for (var k in v) {
+      if (n >= root.maxScreenVideos) break
+      var name = root.safeName(k, "")
+      if (name === "") continue
+      var o = v[k]
+      if (!o || typeof o !== "object") continue
+      var e = ({})
+      if (o.mode !== undefined) e.mode = root.safeMode(o.mode)
+      if (o.order !== undefined) e.order = root.safeOrder(o.order)
+      if (o.interval !== undefined) e.interval = root.safeInterval(o.interval)
+      if (o.playlist !== undefined) e.playlist = root.normalizePlaylist(o.playlist)
+      if (o.speed !== undefined) e.speed = root.safeSpeed(o.speed)
+      if (o.off !== undefined) e.off = root.safeBool(o.off)
+      if (o.paused !== undefined) e.paused = root.safeBool(o.paused)
+      out[name] = e
+      n++
+    }
+    return out
+  }
+
+  // ------------------------------------------------------------ the library
+  // Lives here rather than in Panel.qml because rotation needs it with the
+  // panel shut; the panel reads `availableVideos` instead of scanning again.
+  readonly property int scanLimit: 500
+  readonly property int entryLimit: 20000
+  readonly property int scanSeconds: 5
+  property var availableVideos: []      // [{ path, name }]
+  property bool videosTruncated: false
+
+  readonly property string scanScript:
+    'lim=$1; emax=$2\n' +
+    'for d in "$HOME/Videos/Wallpapers" "$HOME/Videos"; do\n' +
+    '  [ -d "$d" ] || continue\n' +
+    '  entries=$(ls -U -1 -- "$d" 2>/dev/null | head -n "$emax")\n' +
+    '  [ -n "$entries" ] || continue\n' +
+    '  if [ "$(printf "%s\\n" "$entries" | wc -l)" -ge "$emax" ]; then\n' +
+    '    printf "TRUNC\\n" >&2\n' +
+    '  fi\n' +
+    '  printf "%s\\n" "$entries" |\n' +
+    '    grep -iE "\\.(mp4|mkv|webm|mov|avi)$" | head -n "$lim" |\n' +
+    '    while IFS= read -r f; do\n' +
+    '      [ -f "$d/$f" ] && printf "%s/%s\\n" "$d" "$f"\n' +
+    '    done\n' +
+    'done | sort -u | head -n "$lim"\n'
+
+  function rescanLibrary() { libraryScan.running = true }
+
+  Process {
+    id: libraryScan
+    command: ["timeout", "-k", "1", String(root.scanSeconds),
+              "bash", "-c", root.scanScript, "_",
+              String(root.scanLimit + 1), String(root.entryLimit)]
+    onExited: function(code) { if (code !== 0) root.videosTruncated = true }
+    stderr: StdioCollector {
+      onStreamFinished: if (String(text || "").indexOf("TRUNC") !== -1) root.videosTruncated = true
+    }
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var seen = ({})
+        var list = []
+        root.videosTruncated = false
+        var lines = String(text || "").split("\n")
+        for (var i = 0; i < lines.length; i++) {
+          var pth = root.safePath(lines[i])
+          if (pth === "" || Object.prototype.hasOwnProperty.call(seen, pth)) continue
+          if (list.length >= root.scanLimit) { root.videosTruncated = true; break }
+          seen[pth] = true
+          var slash = pth.lastIndexOf("/")
+          list.push({ path: pth, name: slash >= 0 ? pth.substring(slash + 1) : pth })
+        }
+        root.availableVideos = list
+        root.seedRotation()
+      }
+    }
+  }
+
+  // So clips dropped into ~/Videos join the rotation without opening the panel.
+  // Only while something is actually rotating: with rotation off nobody reads
+  // the library except the panel, and the panel rescans when it opens.
+  Timer {
+    interval: 300000
+    running: root.anyRotationActive
+    repeat: true
+    onTriggered: root.rescanLibrary()
+  }
+
+  // ----------------------------------------------------------- the rotation
+  // The pool of clips rotation draws from, filtered to files that are really
+  // there so a deleted clip cannot blank a monitor mid-cycle.
+  // ------------------------------------------------- per-screen profiles
+  // No entry in screenRotation means the screen follows the globals, which are
+  // what the panel edits under "All screens". An entry overrides them.
+  //
+  // Everything derived is resolved once, here, into a real property. A binding
+  // that reads `screenPlans` re-evaluates whenever any input changes -
+  // screenRotation, the globals, the library, or the file-existence maps -
+  // without anything having to remember to signal it.
+  readonly property var screenPlans: {
+    var plans = ({})
+    var sr = root.screenRotation || ({})
+    var gMode = root.rotationMode
+    var gOrder = root.rotationOrder
+    var gInterval = root.rotationInterval
+    var gList = root.playlist || []
+    var gSpeed = root.playbackSpeed
+    var gOff = !root.enabled
+    var gPaused = root.manualPaused
+    var av = root.availableVideos || []
+
+    // Read explicitly so the binding depends on them: the pool below is
+    // filtered by pathExists(), which is a function call and would otherwise
+    // leave no trace for QML to track.
+    var _ex = root.existingPaths, _lib = root.libraryPaths, _st = root.statedPaths
+
+    var screens = Quickshell.screens
+    for (var i = 0; i < screens.length; i++) {
+      var n = String(screens[i].name)
+      var o = Object.prototype.hasOwnProperty.call(sr, n) ? sr[n] : null
+
+      var mode = root.safeMode(o && o.mode !== undefined ? o.mode : gMode)
+      var order = root.safeOrder(o && o.order !== undefined ? o.order : gOrder)
+      var interval = root.safeInterval(o && o.interval !== undefined ? o.interval : gInterval)
+      var list = (o && o.playlist !== undefined) ? root.normalizePlaylist(o.playlist) : gList
+
+      var pool = []
+      if (mode === "selected") {
+        for (var j = 0; j < list.length; j++)
+          if (root.pathExists(list[j])) pool.push(String(list[j]))
+      } else if (mode !== "off") {
+        for (var k = 0; k < av.length; k++) pool.push(String(av[k].path))
+      }
+
+      // Playback, resolved the same way: an entry overrides, absence inherits.
+      var speed = root.safeSpeed(o && o.speed !== undefined ? o.speed : gSpeed)
+      var off = (o && o.off !== undefined) ? o.off === true : gOff
+      var paused = (o && o.paused !== undefined) ? o.paused === true : gPaused
+
+      plans[n] = {
+        mode: mode, order: order, interval: interval,
+        playlist: list, pool: pool,
+        active: mode !== "off" && pool.length > 0 && !off,
+        speed: speed, off: off, paused: paused,
+        // Only true when the screen sets its OWN playback, so the panel can
+        // tell "stopped because I stopped this screen" from "stopped because
+        // everything is stopped".
+        ownPlayback: !!(o && (o.speed !== undefined || o.off !== undefined || o.paused !== undefined)),
+        own: o !== null
+      }
+    }
+    return plans
+  }
+
+  function planFor(name) {
+    var p = root.screenPlans || ({})
+    var n = String(name)
+    return Object.prototype.hasOwnProperty.call(p, n) ? p[n] : null
+  }
+
+  // Thin readers over screenPlans, kept for the IPC/status surface. A screen
+  // that is not connected has no plan, so these fall back to the globals.
+  function hasOwnProfile(name) { var p = root.planFor(name); return p ? p.own === true : false }
+  function rotModeFor(name) { var p = root.planFor(name); return p ? p.mode : root.safeMode(root.rotationMode) }
+  function rotOrderFor(name) { var p = root.planFor(name); return p ? p.order : root.safeOrder(root.rotationOrder) }
+  function rotIntervalFor(name) { var p = root.planFor(name); return p ? p.interval : root.safeInterval(root.rotationInterval) }
+  function rotPlaylistFor(name) { var p = root.planFor(name); return p ? p.playlist : (root.playlist || []) }
+  function rotationActiveFor(name) { var p = root.planFor(name); return p ? p.active === true : false }
+
+  // Playback readers. A disconnected screen has no plan, so fall back to global.
+  function speedFor(name) { var p = root.planFor(name); return p ? p.speed : root.playbackSpeed }
+  function offFor(name) { var p = root.planFor(name); return p ? p.off === true : !root.enabled }
+  function pausedFor(name) { var p = root.planFor(name); return p ? p.paused === true : root.manualPaused }
+  function hasOwnPlayback(name) { var p = root.planFor(name); return p ? p.ownPlayback === true : false }
+
+  readonly property bool anyRotationActive: {
+    var p = root.screenPlans || ({})
+    for (var k in p) if (p[k].active === true) return true
+    return false
+  }
+
+  function _pickIndex(name, pool, prevIdx) {
+    if (pool.length <= 1) return 0
+    if (root.rotOrderFor(name) === "sequential")
+      return (prevIdx + 1) % pool.length
+    var n = prevIdx
+    for (var guard = 0; guard < 12 && n === prevIdx; guard++)
+      n = Math.floor(Math.random() * pool.length)
+    return n
+  }
+
+  // Idempotent: only touches a screen that has no clip yet, or whose clip has
+  // fallen out of its pool. Safe to run on every screenPlans change, which is
+  // what starts rotation the moment a pool becomes usable - the stat that fills
+  // it is async, so the mutator that set the playlist ran too early to know.
+  // Screens start at different offsets so a two-monitor setup does not open on
+  // the same clip on both.
+  function seedRotation() {
+    var plans = root.screenPlans || ({})
+    var cur = ({}), cus = ({})
+    for (var a in root.rotCurrent) cur[a] = root.rotCurrent[a]
+    for (var b in root.rotCursor) cus[b] = root.rotCursor[b]
+
+    var changed = false
+    var i = 0
+    for (var n in plans) {
+      var pl = plans[n]
+      if (!pl.active) {
+        if (cur[n] !== undefined) { delete cur[n]; delete cus[n]; changed = true }
+      } else if (cur[n] === undefined || pl.pool.indexOf(cur[n]) < 0) {
+        var idx = pl.order === "sequential"
+                ? (i % pl.pool.length)
+                : Math.floor(Math.random() * pl.pool.length)
+        cus[n] = idx
+        cur[n] = pl.pool[idx]
+        changed = true
+      }
+      i++
+    }
+    if (changed) { root.rotCursor = cus; root.rotCurrent = cur }
+  }
+
+  // Each screen keeps its own cursor, so monitors sharing a playlist still sit
+  // at different points in it.
+  function advanceRotationFor(name) {
+    var n = String(name)
+    var pl = root.planFor(n)
+    if (!pl || !pl.active) return
+    var pool = pl.pool
+    var prevCur = root.rotCursor || ({})
+    var prev = Object.prototype.hasOwnProperty.call(prevCur, n) ? Number(prevCur[n]) : -1
+    if (!isFinite(prev) || prev < 0 || prev >= pool.length) prev = 0
+    var nxt = root._pickIndex(n, pool, prev)
+
+    var cur = ({}), cus = ({})
+    for (var a in root.rotCurrent) cur[a] = root.rotCurrent[a]
+    for (var b in root.rotCursor) cus[b] = root.rotCursor[b]
+    cus[n] = nxt
+    cur[n] = pool[nxt]
+    root.rotCursor = cus
+    root.rotCurrent = cur
+  }
+
+  // "Next" with no screen advances every rotating screen.
+  function advanceRotation(name) {
+    if (name !== undefined && String(name) !== "" && String(name) !== "all") {
+      root.advanceRotationFor(name)
+      return
+    }
+    var plans = root.screenPlans || ({})
+    for (var n in plans) root.advanceRotationFor(n)
+  }
+
+  // seedRotation() is idempotent, so hanging it off screenPlans covers every
+  // input at once - the globals, per-screen overrides, the library, and the
+  // async stat that decides whether a "selected" pool is usable yet.
+  onScreenPlansChanged: root.seedRotation()
+
+  // No global rotation timer any more: each monitor's surface owns its own,
+  // running at that screen's own interval. See the Timer in the Variants
+  // delegate below.
+
   // --------------------------------------------------------- clip resolution
   // The clip CONFIGURED for a monitor — its own override if it has one,
   // otherwise the default clip when `output` targets it. "" means nothing.
@@ -220,14 +607,32 @@ Item {
   function configuredPathForScreen(name) {
     var n = String(name)
     var sv = root.screenVideos || ({})
-    if (Object.prototype.hasOwnProperty.call(sv, n)) return String(sv[n] || "")
+    var pinned = Object.prototype.hasOwnProperty.call(sv, n)
+
+    // A monitor deliberately BLANKED ("" in screenVideos) stays blank — that is
+    // the opt-out, and it is how you keep one screen out of the rotation.
+    if (pinned && String(sv[n] || "") === "") return ""
+
+    // Rotation drives every monitor the output targets, including ones with a
+    // per-monitor clip. screenVideos is never rewritten, so switching rotation
+    // off restores those assignments untouched.
+    if (root.rotationActiveFor(n) && (root.output === "all" || root.output === n)) {
+      var rc = root.rotCurrent || ({})
+      if (Object.prototype.hasOwnProperty.call(rc, n) && String(rc[n] || "") !== "")
+        return String(rc[n])
+    }
+
+    // Rotation off (or nothing seeded yet): the original behaviour, unchanged.
+    if (pinned) return String(sv[n] || "")
     if (root.output === "all" || root.output === n) return String(root.videoPath || "")
     return ""
   }
 
   // The clip a monitor should show right now. "" means no surface.
   function pathForScreen(name) {
-    return root.enabled ? root.configuredPathForScreen(name) : ""
+    // A screen with its own `off` decides for itself; otherwise the global
+    // Stop still governs, so nothing changes for anyone not using profiles.
+    return root.offFor(name) ? "" : root.configuredPathForScreen(name)
   }
 
   // Same, as a playable url — empty unless the file is actually there.
@@ -264,7 +669,13 @@ Item {
       enabled: root.enabled,
       output: root.output,
       pauseOnFullscreen: root.pauseOnFullscreen,
-      screenVideos: root.screenVideos || ({})
+      screenVideos: root.screenVideos || ({}),
+      playbackSpeed: root.playbackSpeed,
+      rotationMode: root.rotationMode,
+      rotationOrder: root.rotationOrder,
+      rotationInterval: root.rotationInterval,
+      playlist: root.playlist || [],
+      screenRotation: root.screenRotation || ({})
     }, null, 2) + "\n"
     root.writeState(payload)
   }
@@ -317,6 +728,12 @@ Item {
           root.screenVideos = root.normalizeScreenVideos(o.screenVideos)
           root._stateHadScreens = true
         }
+        if (o.playbackSpeed !== undefined) root.playbackSpeed = root.safeSpeed(o.playbackSpeed)
+        if (o.rotationMode !== undefined) root.rotationMode = root.safeMode(o.rotationMode)
+        if (o.rotationOrder !== undefined) root.rotationOrder = root.safeOrder(o.rotationOrder)
+        if (o.rotationInterval !== undefined) root.rotationInterval = root.safeInterval(o.rotationInterval)
+        if (o.playlist !== undefined) root.playlist = root.normalizePlaylist(o.playlist)
+        if (o.screenRotation !== undefined) root.screenRotation = root.normalizeScreenRotation(o.screenRotation)
         return true
       }
     } catch (e) {
@@ -445,7 +862,7 @@ Item {
     onExited: stateReadProc.running = true
   }
 
-  Component.onCompleted: mkStateDir.running = true
+  Component.onCompleted: { mkStateDir.running = true; root.rescanLibrary() }
 
   // ------------------------------------------------------- fullscreen watch
   // Quickshell.Hyprland.rawEvent tells us WHEN to re-check; hyprctl gives us
@@ -546,7 +963,19 @@ Item {
       readonly property string monName: String(modelData.name)
       readonly property bool monFullscreen: root.pauseOnFullscreen
                                             && (root.fullscreenMonitors[monName] === true)
-      readonly property bool shouldPlay: !root.manualPaused && !monFullscreen
+      readonly property var plan: root.screenPlans[panel.monName] || null
+      readonly property bool monPaused: plan ? plan.paused === true : root.manualPaused
+      readonly property real monSpeed: plan ? plan.speed : root.playbackSpeed
+      readonly property bool shouldPlay: !monPaused && !monFullscreen
+
+      // One timer per monitor, at that monitor's own interval. Gated on
+      // shouldPlay so a fullscreen window does not churn wallpapers behind it.
+      Timer {
+        interval: panel.plan ? panel.plan.interval * 60000 : 600000
+        running: panel.shouldPlay && panel.plan !== null && panel.plan.active === true
+        repeat: true
+        onTriggered: root.advanceRotationFor(panel.monName)
+      }
 
       // ---- A/B double buffer ----
       // A single MediaPlayer per surface cannot change clips cleanly: assigning
@@ -583,6 +1012,7 @@ Item {
         id: playerA
         videoOutput: outA
         loops: MediaPlayer.Infinite
+        playbackRate: panel.monSpeed
         audioOutput: AudioOutput { muted: true; volume: 0 }
         onErrorOccurred: function(err, str) { panel.handleError(playerA, err, str) }
       }
@@ -591,6 +1021,7 @@ Item {
         id: playerB
         videoOutput: outB
         loops: MediaPlayer.Infinite
+        playbackRate: panel.monSpeed
         audioOutput: AudioOutput { muted: true; volume: 0 }
         onErrorOccurred: function(err, str) { panel.handleError(playerB, err, str) }
       }
@@ -722,7 +1153,14 @@ Item {
         for (var i = 0; i < root.activeScreens.length; i++) a.push(String(root.activeScreens[i].name))
         return a
       })(),
-      fullscreenMonitors: Object.keys(root.fullscreenMonitors)
+      fullscreenMonitors: Object.keys(root.fullscreenMonitors),
+      playbackSpeed: root.playbackSpeed,
+      rotationMode: root.rotationMode,
+      rotationOrder: root.rotationOrder,
+      rotationInterval: root.rotationInterval,
+      rotationActive: root.anyRotationActive,
+      playlist: root.playlist || [],
+      libraryCount: (root.availableVideos || []).length
     }
   }
 
@@ -741,10 +1179,19 @@ Item {
         video: p,
         source: own ? "screen" : (p === "" ? "none" : "default"),
         fileExists: p !== "" && root.pathExists(p),
-        paused: root.manualPaused
+        paused: root.pausedFor(n)
                 || (root.pauseOnFullscreen && root.fullscreenMonitors[n] === true),
-        playing: root.urlForScreen(n) !== "" && !root.manualPaused
-                 && !(root.pauseOnFullscreen && root.fullscreenMonitors[n] === true)
+        playing: root.urlForScreen(n) !== "" && !root.pausedFor(n)
+                 && !(root.pauseOnFullscreen && root.fullscreenMonitors[n] === true),
+        rotationMode: root.rotModeFor(n),
+        rotationOrder: root.rotOrderFor(n),
+        rotationInterval: root.rotIntervalFor(n),
+        rotationActive: root.rotationActiveFor(n),
+        rotationOwnProfile: root.hasOwnProfile(n),
+        speed: root.speedFor(n),
+        off: root.offFor(n),
+        ownPlayback: root.hasOwnPlayback(n),
+        playlistCount: root.rotPlaylistFor(n).length
       })
     }
     return out
@@ -782,6 +1229,65 @@ Item {
 
   function applyPause() { root.manualPaused = true }
   function applyResume() { root.manualPaused = false }
+
+  // ---- per-screen playback -------------------------------------------------
+  // Write one field of a screen's own playback. Passing undefined clears it, so
+  // the screen goes back to following the global Play/Stop/Pause and speed.
+  function _setScreenPlayback(screen, field, value) {
+    var sc = root.safeName(screen, "")
+    if (sc === "") return root.statusObject()
+    var m = root._cloneScreenRotation()
+    var e = m[sc] || ({})
+    if (value === undefined) delete e[field]
+    else e[field] = value
+    // An entry holding nothing is the same as no entry; drop it so
+    // hasOwnProfile() stays honest.
+    var empty = true
+    for (var k in e) { empty = false; break }
+    if (empty) delete m[sc]; else m[sc] = e
+    root.screenRotation = m
+    root.persistState()
+    return root.statusObject()
+  }
+
+  function applyStopScreen(screen) { return root._setScreenPlayback(screen, "off", true) }
+  function applyPlayScreen(screen) {
+    var sc = root.safeName(screen, "")
+    if (sc === "") return root.statusObject()
+    // Playing one screen must not leave it hostage to a global Stop.
+    if (!root.enabled) { root.enabled = true; root.manualPaused = false }
+    var m = root._cloneScreenRotation()
+    var e = m[sc] || ({})
+    e.off = false
+    e.paused = false
+    m[sc] = e
+    root.screenRotation = m
+    root.persistState()
+    return root.statusObject()
+  }
+  function applyToggleScreen(screen) {
+    return root.offFor(screen) ? root.applyPlayScreen(screen)
+                               : root.applyStopScreen(screen)
+  }
+  function applyPauseScreen(screen) { return root._setScreenPlayback(screen, "paused", true) }
+  function applyResumeScreen(screen) { return root._setScreenPlayback(screen, "paused", false) }
+  function applySetSpeedOn(screen, v) { return root._setScreenPlayback(screen, "speed", root.safeSpeed(v)) }
+
+  // Drop a screen's own playback fields; rotation settings are left alone.
+  function applyClearScreenPlayback(screen) {
+    var sc = root.safeName(screen, "")
+    if (sc === "") return root.statusObject()
+    var m = root._cloneScreenRotation()
+    var e = m[sc]
+    if (!e) return root.statusObject()
+    delete e.speed; delete e.off; delete e.paused
+    var empty = true
+    for (var k in e) { empty = false; break }
+    if (empty) delete m[sc]; else m[sc] = e
+    root.screenRotation = m
+    root.persistState()
+    return root.statusObject()
+  }
 
   // Play `path` on every monitor: sets the default clip, drops every
   // per-monitor override and un-targets, so "all screens" really means all of
@@ -855,6 +1361,80 @@ Item {
     return root.statusObject()
   }
 
+  function applySetSpeed(v) {
+    root.playbackSpeed = root.safeSpeed(v)
+    root.persistState()
+    return root.statusObject()
+  }
+
+  // A new object, so bindings reading the map actually re-evaluate.
+  function _cloneScreenRotation() {
+    var out = ({})
+    var sr = root.screenRotation || ({})
+    for (var k in sr) {
+      var e = ({})
+      for (var f in sr[k]) e[f] = sr[k][f]
+      out[k] = e
+    }
+    return out
+  }
+
+  // screen === "" or "all" edits the global defaults; a connector name edits
+  // just that monitor's profile, creating one if it had none.
+  function applySetRotation(mode, order, minutes, screen) {
+    var sc = String(screen === undefined ? "" : screen)
+    if (sc === "" || sc === "all") {
+      if (mode !== undefined && String(mode) !== "") root.rotationMode = root.safeMode(mode)
+      if (order !== undefined && String(order) !== "") root.rotationOrder = root.safeOrder(order)
+      if (minutes !== undefined && String(minutes) !== "") root.rotationInterval = root.safeInterval(minutes)
+    } else {
+      var m = root._cloneScreenRotation()
+      var e = m[sc] || ({})
+      if (mode !== undefined && String(mode) !== "") e.mode = root.safeMode(mode)
+      if (order !== undefined && String(order) !== "") e.order = root.safeOrder(order)
+      if (minutes !== undefined && String(minutes) !== "") e.interval = root.safeInterval(minutes)
+      m[sc] = e
+      root.screenRotation = m
+    }
+    root.seedRotation()
+    root.persistState()
+    return root.statusObject()
+  }
+
+  function applySetPlaylist(paths, screen) {
+    var sc = String(screen === undefined ? "" : screen)
+    if (sc === "" || sc === "all") {
+      root.playlist = root.normalizePlaylist(paths)
+    } else {
+      var m = root._cloneScreenRotation()
+      var e = m[sc] || ({})
+      e.playlist = root.normalizePlaylist(paths)
+      m[sc] = e
+      root.screenRotation = m
+    }
+    root.seedRotation()
+    root.persistState()
+    return root.statusObject()
+  }
+
+  // Drop a screen's override so it follows the global settings again.
+  function applyClearScreenRotation(screen) {
+    var sc = root.safeName(screen, "")
+    if (sc === "") return root.statusObject()
+    var m = root._cloneScreenRotation()
+    delete m[sc]
+    root.screenRotation = m
+    root.seedRotation()
+    root.persistState()
+    return root.statusObject()
+  }
+
+  // Skip ahead without waiting out the interval. No screen = every screen.
+  function applyNextVideo(screen) {
+    root.advanceRotation(screen)
+    return root.statusObject()
+  }
+
   IpcHandler {
     target: "motion-wallpaper"
 
@@ -915,6 +1495,68 @@ Item {
 
     function status(): string {
       return JSON.stringify(root.statusObject())
+    }
+
+    function setSpeed(value: string): string {
+      return JSON.stringify(root.applySetSpeed(value))
+    }
+
+    function setRotation(mode: string, order: string, minutes: string): string {
+      return JSON.stringify(root.applySetRotation(mode, order, minutes, ""))
+    }
+
+    // Same, aimed at one monitor: setRotationOn DP-1 all shuffle 5
+    function setRotationOn(screen: string, mode: string, order: string, minutes: string): string {
+      return JSON.stringify(root.applySetRotation(mode, order, minutes, screen))
+    }
+
+    // Drop a screen's own profile; it follows the global settings again.
+    function clearRotationOn(screen: string): string {
+      return JSON.stringify(root.applyClearScreenRotation(screen))
+    }
+
+    function setPlaylist(paths: string): string {
+      return JSON.stringify(root.applySetPlaylist(String(paths || "").split(":"), ""))
+    }
+
+    function setPlaylistOn(screen: string, paths: string): string {
+      return JSON.stringify(root.applySetPlaylist(String(paths || "").split(":"), screen))
+    }
+
+    function next(): string {
+      return JSON.stringify(root.applyNextVideo(""))
+    }
+
+    function nextOn(screen: string): string {
+      return JSON.stringify(root.applyNextVideo(screen))
+    }
+
+    function playOnScreen(screen: string): string {
+      return JSON.stringify(root.applyPlayScreen(screen))
+    }
+
+    function stopOnScreen(screen: string): string {
+      return JSON.stringify(root.applyStopScreen(screen))
+    }
+
+    function toggleOnScreen(screen: string): string {
+      return JSON.stringify(root.applyToggleScreen(screen))
+    }
+
+    function pauseOnScreen(screen: string): string {
+      return JSON.stringify(root.applyPauseScreen(screen))
+    }
+
+    function resumeOnScreen(screen: string): string {
+      return JSON.stringify(root.applyResumeScreen(screen))
+    }
+
+    function setSpeedOn(screen: string, value: string): string {
+      return JSON.stringify(root.applySetSpeedOn(screen, value))
+    }
+
+    function followGlobalPlayback(screen: string): string {
+      return JSON.stringify(root.applyClearScreenPlayback(screen))
     }
 
     function ping(): string { return "ok" }

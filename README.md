@@ -111,6 +111,11 @@ motion-wallpaper toggle          # flip on/off
 motion-wallpaper pause           # pause / resume
 motion-wallpaper resume
 motion-wallpaper autopause off   # or: on
+motion-wallpaper speed 0.5       # playback speed, 0.25-2 (e.g. 1, 0.66)
+motion-wallpaper stop DP-2       # blank one monitor; the other keeps playing
+motion-wallpaper play DP-2       # and start it again
+motion-wallpaper speed 0.5 DP-1  # speed for just that monitor
+motion-wallpaper follow DP-1     # drop its own settings, follow the default
 ```
 
 ### With a keybind
@@ -148,6 +153,72 @@ motion-wallpaper screens          # check what landed where
 ```
 
 Connector names come from `hyprctl monitors`. A monitor keeps its clip while it is unplugged, so it comes back to the right one; a monitor you have never set follows the default `videoPath` (and the legacy `motion-wallpaper screen <name|all>` targeting, which only applies to monitors with no clip of their own).
+
+### Playback speed
+
+A **SPEED** slider in the panel sets how fast the clip plays, anywhere from `0.25x` to `2x`. It is free rather than stepped — `0.66` and `0.99` are as reachable as `1` — with tick marks at the round speeds as anchors. Dragging previews live; letting go saves. The speed applies to every monitor.
+
+```bash
+motion-wallpaper speed 0.5
+```
+
+### One profile per screen
+
+Everything below the **SCREEN** dropdown follows it: the clip list, rotation, the speed slider, and Play/Stop/Pause. On *All screens* you are editing the shared default; on a named screen you are editing that screen alone.
+
+A screen with no settings of its own follows the shared default, so nothing changes until you give it some. Using any control while a screen is selected gives it its own; a line in the ROTATION section always says which of the two you are editing. To hand a screen back to the shared default, use the CLI:
+
+```bash
+motion-wallpaper follow DP-1              # rotation and playback
+motion-wallpaper follow DP-1 rotation     # or just one half
+```
+
+So one monitor can be stopped, slowed down, or rotating on its own schedule while the other carries on:
+
+```bash
+motion-wallpaper stop DP-2          # DP-1 keeps playing
+motion-wallpaper speed 0.5 DP-1     # only that monitor slows down
+motion-wallpaper pause DP-2         # freeze one screen
+motion-wallpaper play DP-2          # start it again
+motion-wallpaper follow DP-1        # back to the shared default
+```
+
+The global **Stop** still governs every screen that has no profile of its own, so the plugin behaves exactly as before for anyone not using this.
+
+### Rotation
+
+**Off by default.** Left alone, the plugin behaves exactly as it always has: one clip per monitor until you change it. Turn rotation on and it cycles your library instead.
+
+In the panel's **ROTATION** section:
+
+| Setting | Options |
+|---|---|
+| Mode | Off · Rotate all videos · Rotate chosen videos |
+| Order | Shuffle · In order |
+| Change every | 1, 2, 5, 10, 15, 30 minutes, or 1 hour |
+| Videos in rotation | which clips to cycle, in *chosen* mode |
+
+**Each monitor can rotate differently.** The rotation controls follow the **SCREEN** dropdown, the same as the video list: on *All screens* you are editing the shared default, and on a named screen you are editing that screen alone. A screen with no settings of its own follows the shared default; changing anything while it is selected gives it its own, and a **Follow default** button hands it back.
+
+So one monitor can shuffle every five minutes while the other sits on a single clip:
+
+```bash
+motion-wallpaper rotate all shuffle 5 DP-1   # DP-1 shuffles the whole library
+motion-wallpaper rotate off "" "" DP-2       # DP-2 stays on its clip
+motion-wallpaper next DP-1                   # skip ahead now
+motion-wallpaper follow DP-1                 # back to the shared default
+```
+
+For *chosen* mode, pick the clips first:
+
+```bash
+motion-wallpaper playlist DP-1 ~/Videos/a.mp4 ~/Videos/b.mp4
+motion-wallpaper rotate selected order 10 DP-1
+```
+
+Each monitor keeps its own position in the list, so two screens sharing a playlist rarely show the same clip at the same time. Rotation drives monitors that have a clip of their own too — that clip is just what is showing there now — and turning rotation off restores it untouched. A monitor blanked with `off` stays blank: that is how you keep one screen out of the rotation entirely.
+
+Rotation pauses with the video, so a fullscreen window does not churn wallpapers behind it.
 
 ### Persistence
 

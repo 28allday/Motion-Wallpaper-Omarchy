@@ -169,9 +169,20 @@ cmd_screens() {
 
 # play <file> [screen] — no screen means every monitor (and drops any
 # per-monitor clips); with a screen, only that monitor changes.
+is_screen() {
+  local n="${1:-}"
+  [ -n "$n" ] || return 1
+  ipc status 2>/dev/null | jq -e --arg n "$n" '(.screens // [])[] | select(.name == $n)' >/dev/null 2>&1
+}
+
 cmd_play() {
   require_plugin
   local f="${1:-}" s="${2:-}"
+  # `play DP-1` (a monitor, no file) restarts that screen after `stop DP-1`.
+  if [ -z "$s" ] && is_screen "$f"; then
+    ipc playOnScreen "$f" >/dev/null
+    return
+  fi
   [ -n "$f" ] || { err "usage: motion-wallpaper play <file> [screen]"; exit 1; }
   [ -f "$f" ] || { err "file not found: $f"; exit 1; }
   local p; p="$(readlink -f "$f")"
@@ -213,18 +224,115 @@ cmd_autopause() {
   esac
 }
 
+cmd_speed() {
+  require_plugin
+  local v="${1:-}" s="${2:-}"
+  case "$v" in
+    ""|*[!0-9.]*|*.*.*) err "usage: motion-wallpaper speed <0.25-2> [screen]"; exit 1 ;;
+  esac
+  if [ -n "$s" ] && [ "$s" != "all" ]; then ipc setSpeedOn "$s" "$v" >/dev/null
+  else ipc setSpeed "$v" >/dev/null; fi
+}
+
+# Play/stop/pause/resume, optionally for one monitor. Without a screen these are
+# the global controls they always were.
+cmd_transport() {
+  require_plugin
+  local verb="$1" s="${2:-}"
+  if [ -z "$s" ] || [ "$s" = "all" ]; then
+    case "$verb" in
+      stop)   ipc stop     >/dev/null ;;
+      toggle) ipc toggle   >/dev/null ;;
+      pause)  ipc pause    >/dev/null ;;
+      resume) ipc resume   >/dev/null ;;
+    esac
+    return
+  fi
+  case "$verb" in
+    stop)   ipc stopOnScreen   "$s" >/dev/null ;;
+    toggle) ipc toggleOnScreen "$s" >/dev/null ;;
+    pause)  ipc pauseOnScreen  "$s" >/dev/null ;;
+    resume) ipc resumeOnScreen "$s" >/dev/null ;;
+  esac
+}
+
+# rotate <off|all|selected> [shuffle|order] [minutes] [screen]
+cmd_rotate() {
+  require_plugin
+  local mode="${1:-}" order="${2:-}" mins="${3:-}" screen="${4:-}"
+  case "$mode" in
+    off|all|selected) ;;
+    *) err "usage: motion-wallpaper rotate <off|all|selected> [shuffle|order] [minutes] [screen]"; exit 1 ;;
+  esac
+  case "$order" in
+    ""|shuffle) order=shuffle ;;
+    order|sequential) order=sequential ;;
+    *) err "order must be 'shuffle' or 'order'"; exit 1 ;;
+  esac
+  if [ -n "$screen" ] && [ "$screen" != "all" ]; then
+    ipc setRotationOn "$screen" "$mode" "$order" "$mins" >/dev/null
+  else
+    ipc setRotation "$mode" "$order" "$mins" >/dev/null
+  fi
+}
+
+# playlist <screen|all> <file...>
+cmd_playlist() {
+  require_plugin
+  local screen="${1:-}"; shift || true
+  [ -n "$screen" ] || { err "usage: motion-wallpaper playlist <screen|all> <file>..."; exit 1; }
+  [ "$#" -gt 0 ] || { err "usage: motion-wallpaper playlist <screen|all> <file>..."; exit 1; }
+  local joined="" f p
+  for f in "$@"; do
+    p="$(readlink -f "$f")" || { err "no such file: $f"; exit 1; }
+    [ -f "$p" ] || { err "no such file: $f"; exit 1; }
+    joined="${joined:+$joined:}$p"
+  done
+  if [ "$screen" = "all" ]; then
+    ipc setPlaylist "$joined" >/dev/null
+  else
+    ipc setPlaylistOn "$screen" "$joined" >/dev/null
+  fi
+}
+
+cmd_next() {
+  require_plugin
+  local s="${1:-}"
+  if [ -n "$s" ] && [ "$s" != "all" ]; then ipc nextOn "$s" >/dev/null
+  else ipc next >/dev/null; fi
+}
+
+# Drop a screen's own settings so it follows the shared default again.
+cmd_follow() {
+  require_plugin
+  local s="${1:-}" what="${2:-all}"
+  [ -n "$s" ] || { err "usage: motion-wallpaper follow <screen> [rotation|playback|all]"; exit 1; }
+  case "$what" in
+    rotation) ipc clearRotationOn "$s" >/dev/null ;;
+    playback) ipc followGlobalPlayback "$s" >/dev/null ;;
+    all)      ipc clearRotationOn "$s" >/dev/null
+              ipc followGlobalPlayback "$s" >/dev/null ;;
+    *) err "follow: expected rotation, playback or all"; exit 1 ;;
+  esac
+}
+
 case "${1:-status}" in
   status|"") cmd_status ;;
   screens)   cmd_screens ;;
   play)      shift; cmd_play "${1:-}" "${2:-}" ;;
   off)       shift; cmd_off "${1:-}" ;;
   clear)     shift; cmd_clear "${1:-}" ;;
-  stop)      require_plugin; ipc stop   >/dev/null ;;
-  toggle)    require_plugin; ipc toggle >/dev/null ;;
-  pause)     require_plugin; ipc pause  >/dev/null ;;
-  resume)    require_plugin; ipc resume >/dev/null ;;
+  stop)      shift; cmd_transport stop   "${1:-}" ;;
+  toggle)    shift; cmd_transport toggle "${1:-}" ;;
+  pause)     shift; cmd_transport pause  "${1:-}" ;;
+  resume)    shift; cmd_transport resume "${1:-}" ;;
   screen)    shift; cmd_screen "${1:-}" ;;
   autopause) shift; cmd_autopause "${1:-}" ;;
+  speed)     shift; cmd_speed "${1:-}" "${2:-}" ;;
+  rotate)    shift; cmd_rotate "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+  playlist)  shift; cmd_playlist "$@" ;;
+  next)      shift; cmd_next "${1:-}" ;;
+  follow)    shift; cmd_follow "${1:-}" "${2:-}" ;;
   -h|--help)
     cat <<USAGE
 $APP_NAME — control the omarchy-shell video wallpaper plugin.
@@ -234,13 +342,31 @@ Usage: ${0##*/} [command]
   status                Print current state, per monitor (default).
   screens               List each monitor and the clip it is showing.
   play <file> [screen]  Start a video everywhere, or on one monitor.
+  play <screen>         Restart one monitor after `stop <screen>`.
   off <screen>          Blank one monitor; the others keep playing.
   clear <screen|all>    Drop a monitor's own clip; follow the default again.
-  stop                  Stop; static wallpaper shows through.
-  toggle                Flip on/off (good for a keybind).
-  pause | resume        Pause/resume playback.
+  stop [screen]         Stop everywhere, or blank one monitor.
+  toggle [screen]       Flip on/off (good for a keybind).
+  pause | resume [screen]   Pause/resume, everywhere or on one monitor.
   screen <name|all>     Coarse targeting for monitors with no clip of their own.
   autopause <on|off>    Pause video under fullscreen windows.
+  speed <0.25-2> [screen]   Playback speed, e.g. 1, 0.5, 0.66.
+
+Rotation (off by default — one clip until you turn it on):
+  rotate <off|all|selected> [shuffle|order] [minutes] [screen]
+  playlist <screen|all> <file>...   Clips for "selected" mode.
+  next [screen]         Skip ahead without waiting out the interval.
+  follow <screen> [rotation|playback|all]
+                        Drop a screen's own settings; follow the default.
+
+Each screen has its own profile — rotation, speed and Play/Stop:
+  ${0##*/} stop DP-2                 # DP-1 keeps playing
+  ${0##*/} speed 0.5 DP-1            # just that monitor
+  ${0##*/} follow DP-1               # back to the shared default
+
+Each screen can rotate differently — shuffle on one, fixed on the other:
+  ${0##*/} rotate all shuffle 5 DP-1
+  ${0##*/} rotate off "" "" DP-2
 
 Different clips on different screens:
   ${0##*/} play ~/Videos/a.mp4 DP-1
