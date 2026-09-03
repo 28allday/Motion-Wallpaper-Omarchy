@@ -222,6 +222,59 @@ cmd_speed() {
   ipc setSpeed "$v" >/dev/null
 }
 
+# rotate <off|all|selected> [shuffle|order] [minutes] [screen]
+cmd_rotate() {
+  require_plugin
+  local mode="${1:-}" order="${2:-}" mins="${3:-}" screen="${4:-}"
+  case "$mode" in
+    off|all|selected) ;;
+    *) err "usage: motion-wallpaper rotate <off|all|selected> [shuffle|order] [minutes] [screen]"; exit 1 ;;
+  esac
+  case "$order" in
+    ""|shuffle) order=shuffle ;;
+    order|sequential) order=sequential ;;
+    *) err "order must be 'shuffle' or 'order'"; exit 1 ;;
+  esac
+  if [ -n "$screen" ] && [ "$screen" != "all" ]; then
+    ipc setRotationOn "$screen" "$mode" "$order" "$mins" >/dev/null
+  else
+    ipc setRotation "$mode" "$order" "$mins" >/dev/null
+  fi
+}
+
+# playlist <screen|all> <file...>
+cmd_playlist() {
+  require_plugin
+  local screen="${1:-}"; shift || true
+  [ -n "$screen" ] || { err "usage: motion-wallpaper playlist <screen|all> <file>..."; exit 1; }
+  [ "$#" -gt 0 ] || { err "usage: motion-wallpaper playlist <screen|all> <file>..."; exit 1; }
+  local joined="" f p
+  for f in "$@"; do
+    p="$(readlink -f "$f")" || { err "no such file: $f"; exit 1; }
+    [ -f "$p" ] || { err "no such file: $f"; exit 1; }
+    joined="${joined:+$joined:}$p"
+  done
+  if [ "$screen" = "all" ]; then
+    ipc setPlaylist "$joined" >/dev/null
+  else
+    ipc setPlaylistOn "$screen" "$joined" >/dev/null
+  fi
+}
+
+cmd_next() {
+  require_plugin
+  local s="${1:-}"
+  if [ -n "$s" ] && [ "$s" != "all" ]; then ipc nextOn "$s" >/dev/null
+  else ipc next >/dev/null; fi
+}
+
+cmd_follow() {
+  require_plugin
+  local s="${1:-}"
+  [ -n "$s" ] || { err "usage: motion-wallpaper follow <screen>"; exit 1; }
+  ipc clearRotationOn "$s" >/dev/null
+}
+
 case "${1:-status}" in
   status|"") cmd_status ;;
   screens)   cmd_screens ;;
@@ -235,6 +288,10 @@ case "${1:-status}" in
   screen)    shift; cmd_screen "${1:-}" ;;
   autopause) shift; cmd_autopause "${1:-}" ;;
   speed)     shift; cmd_speed "${1:-}" ;;
+  rotate)    shift; cmd_rotate "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+  playlist)  shift; cmd_playlist "$@" ;;
+  next)      shift; cmd_next "${1:-}" ;;
+  follow)    shift; cmd_follow "${1:-}" ;;
   -h|--help)
     cat <<USAGE
 $APP_NAME — control the omarchy-shell video wallpaper plugin.
@@ -252,6 +309,16 @@ Usage: ${0##*/} [command]
   screen <name|all>     Coarse targeting for monitors with no clip of their own.
   autopause <on|off>    Pause video under fullscreen windows.
   speed <0.25-2>        Playback speed, e.g. 1, 0.5, 0.66.
+
+Rotation (off by default — one clip until you turn it on):
+  rotate <off|all|selected> [shuffle|order] [minutes] [screen]
+  playlist <screen|all> <file>...   Clips for "selected" mode.
+  next [screen]         Skip ahead without waiting out the interval.
+  follow <screen>       Drop a screen's own settings; follow the default.
+
+Each screen can rotate differently — shuffle on one, fixed on the other:
+  ${0##*/} rotate all shuffle 5 DP-1
+  ${0##*/} rotate off "" "" DP-2
 
 Different clips on different screens:
   ${0##*/} play ~/Videos/a.mp4 DP-1

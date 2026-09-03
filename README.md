@@ -158,6 +158,41 @@ A **SPEED** slider in the panel sets how fast the clip plays, anywhere from `0.2
 motion-wallpaper speed 0.5
 ```
 
+### Rotation
+
+**Off by default.** Left alone, the plugin behaves exactly as it always has: one clip per monitor until you change it. Turn rotation on and it cycles your library instead.
+
+In the panel's **ROTATION** section:
+
+| Setting | Options |
+|---|---|
+| Mode | Off · Rotate all videos · Rotate chosen videos |
+| Order | Shuffle · In order |
+| Change every | 1, 2, 5, 10, 15, 30 minutes, or 1 hour |
+| Videos in rotation | which clips to cycle, in *chosen* mode |
+
+**Each monitor can rotate differently.** The rotation controls follow the **SCREEN** dropdown, the same as the video list: on *All screens* you are editing the shared default, and on a named screen you are editing that screen alone. A screen with no settings of its own follows the shared default; changing anything while it is selected gives it its own, and a **Follow default** button hands it back.
+
+So one monitor can shuffle every five minutes while the other sits on a single clip:
+
+```bash
+motion-wallpaper rotate all shuffle 5 DP-1   # DP-1 shuffles the whole library
+motion-wallpaper rotate off "" "" DP-2       # DP-2 stays on its clip
+motion-wallpaper next DP-1                   # skip ahead now
+motion-wallpaper follow DP-1                 # back to the shared default
+```
+
+For *chosen* mode, pick the clips first:
+
+```bash
+motion-wallpaper playlist DP-1 ~/Videos/a.mp4 ~/Videos/b.mp4
+motion-wallpaper rotate selected order 10 DP-1
+```
+
+Each monitor keeps its own position in the list, so two screens sharing a playlist rarely show the same clip at the same time. Rotation drives monitors that have a clip of their own too — that clip is just what is showing there now — and turning rotation off restores it untouched. A monitor blanked with `off` stays blank: that is how you keep one screen out of the rotation entirely.
+
+Rotation pauses with the video, so a fullscreen window does not churn wallpapers behind it.
+
 ### Persistence
 
 A playing wallpaper **resumes automatically after a reboot** — the plugin persists its state to `~/.local/state/motion-wallpaper/state.json` and the shell loads it on login. There's no separate autostart step: `stop` means it stays off next boot, `play` means it comes back.

@@ -47,8 +47,11 @@ Two sources, with a deliberate split:
   `Service.qml`'s `pluginConfig` falls back to `{}` when there is no entry, so
   every setting has a working default and the plugin runs without one.
 - **`~/.local/state/motion-wallpaper/state.json`** is the runtime truth. IPC
-  mutations (play/stop/toggle, screen, auto-pause, speed) write it, so they survive a
-  shell restart and a reboot. Editing the config entry re-seeds the state file.
+  mutations (play/stop/toggle, screen, auto-pause, speed, rotation) write it,
+  so they survive a shell restart and a reboot. Editing the config entry
+  re-seeds the state file. It also carries `playbackSpeed`, the rotation
+  globals and `screenRotation`; all of them are optional, so a state file
+  written by an older version still loads.
 
 That split is why there is no autostart step: `play` means it returns after a
 reboot, `stop` means it stays off.
@@ -111,6 +114,56 @@ range, but any value inside it is honoured.
 The panel drives `playbackSpeed` directly while the slider is dragged and only
 calls `applySetSpeed` on release. A drag would otherwise write `state.json` on
 every pixel.
+
+### Rotation
+
+Off unless asked for: with `rotationMode` `"off"` the clip resolution below is
+byte-for-byte what it was before rotation existed.
+
+Settings live in two layers:
+
+- the **globals** (`rotationMode`, `rotationOrder`, `rotationInterval`,
+  `playlist`) are what the panel edits under *All screens*;
+- **`screenRotation`** is `{ "DP-1": { mode, order, interval, playlist } }`.
+  A screen with no entry follows the globals.
+
+`rotModeFor` / `rotOrderFor` / `rotIntervalFor` / `rotPlaylistFor` resolve
+override-then-global, and `rotationPoolFor` / `rotationActiveFor` build on
+them. `normalizeScreenRotation()` runs every field through the same validators
+as the globals, on the same reasoning as `normalizeScreenVideos()`.
+
+Because those are functions, QML cannot tell when to re-evaluate a binding that
+calls them. `rotRevision` is an integer bumped on every rotation-shaped change;
+bindings read it as a dependency. It is a workaround, not a design — the
+alternative was mirroring every derived value into its own property per screen.
+
+`rotCurrent` / `rotCursor` are `{ connector: ... }` and deliberately **not**
+persisted: rotation re-seeds on start. Each screen keeps its own cursor, so two
+monitors sharing a playlist sit at different points in it.
+
+There is no global rotation timer, because one timer cannot express two
+intervals. Each monitor's surface in the `Variants` delegate owns a `Timer` at
+that screen's interval, gated on `shouldPlay` so a fullscreen window does not
+churn wallpapers behind it. A screen whose rotation is active always has a
+surface, so the delegate is a safe place for it.
+
+Rotation takes precedence over `screenVideos` while active — that clip is just
+what is showing there now. `screenVideos` is never rewritten by rotation, so
+turning it off restores the previous assignment. A monitor explicitly blanked
+(`""`) stays blank; that is the per-screen opt-out.
+
+#### The library, and why `pathExists` has two sources
+
+Rotation has to keep working with the panel shut, so the `~/Videos` scan moved
+out of `Panel.qml` into the service; the panel reads `availableVideos` through
+it. `rescanLibrary()` also runs on a 5-minute timer so new clips join without
+opening the panel.
+
+`pathExists()` consults the async stat first and the scan second. The scan
+already ran `[ -f ]` on every entry, so trusting it avoids blanking a surface
+for a frame each time rotation swaps in a library clip. But the scan can be up
+to five minutes stale, so `statedPaths` records what the stat actually
+examined: once it has looked at a path and not found it, the stat wins.
 
 ### Cross-fade on clip change
 

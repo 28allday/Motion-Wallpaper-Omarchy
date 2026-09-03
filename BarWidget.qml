@@ -86,6 +86,31 @@ BarWidget {
     if (service) service.applySetSpeed(v)
     else ipc("setSpeed", String(v))
   }
+  // scope is "" / "all" for the global defaults, or a connector name.
+  function setRotation(mode, order, minutes, scope) {
+    var sc = String(scope || "")
+    if (service) service.applySetRotation(mode, order, minutes, sc)
+    else if (sc === "" || sc === "all") ipc("setRotation", String(mode), String(order), String(minutes))
+    else ipc("setRotationOn", sc, String(mode), String(order), String(minutes))
+  }
+  function setPlaylist(paths, scope) {
+    var sc = String(scope || "")
+    if (service) service.applySetPlaylist(paths, sc)
+    else if (sc === "" || sc === "all") ipc("setPlaylist", (paths || []).join(":"))
+    else ipc("setPlaylistOn", sc, (paths || []).join(":"))
+  }
+  function clearRotation(scope) {
+    var sc = String(scope || "")
+    if (sc === "" || sc === "all") return
+    if (service) service.applyClearScreenRotation(sc)
+    else ipc("clearRotationOn", sc)
+  }
+  function nextVideo(scope) {
+    var sc = String(scope || "")
+    if (service) service.applyNextVideo(sc)
+    else if (sc === "" || sc === "all") ipc("next")
+    else ipc("nextOn", sc)
+  }
   function setPauseOnFullscreen(on) {
     if (service) service.applySetPauseOnFullscreen(on ? "true" : "false")
     else ipc("setPauseOnFullscreen", on ? "true" : "false")
