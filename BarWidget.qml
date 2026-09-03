@@ -68,6 +68,34 @@ BarWidget {
     if (service) service.applySetScreenVideo(screen, "")
     else ipc("playOn", screen, "")
   }
+  // ---- scoped playback: "" / "all" = global, else one connector ----------
+  function togglePlayPauseScoped(scope) {
+    var sc = String(scope || "")
+    if (sc === "" || sc === "all") { togglePlayPause(); return }
+    if (!service) { ipc("toggleOnScreen", sc); return }
+    if (service.offFor(sc)) service.applyPlayScreen(sc)
+    else if (service.pausedFor(sc)) service.applyResumeScreen(sc)
+    else service.applyPauseScreen(sc)
+  }
+  function stopScoped(scope) {
+    var sc = String(scope || "")
+    if (sc === "" || sc === "all") { stopPlayback(); return }
+    if (service) service.applyStopScreen(sc)
+    else ipc("stopOnScreen", sc)
+  }
+  function setSpeedScoped(v, scope) {
+    var sc = String(scope || "")
+    if (sc === "" || sc === "all") { setSpeed(v); return }
+    if (service) service.applySetSpeedOn(sc, v)
+    else ipc("setSpeedOn", sc, String(v))
+  }
+  function followGlobalPlayback(scope) {
+    var sc = String(scope || "")
+    if (sc === "" || sc === "all") return
+    if (service) service.applyClearScreenPlayback(sc)
+    else ipc("followGlobalPlayback", sc)
+  }
+
   function togglePlayPause() {
     if (!service) { ipc("toggle"); return }
     if (!service.enabled) { service.applyPlay(""); return }
