@@ -124,13 +124,12 @@ Item {
   // ---- video discovery ---------------------------------------------------
   // Hard cap on how many clips the panel will hold and draw. The CLI takes an
   // arbitrary path, so nothing becomes unreachable by capping the browser.
-  readonly property int scanLimit: 500
-  readonly property int entryLimit: 20000   // directory entries examined per folder
-  readonly property int scanSeconds: 5      // hard deadline on the scan process
-  property bool videosTruncated: false
-  property var videos: []   // [{ path, name }]
+  // Read-through to the service's scan rather than a second one.
+  readonly property int scanLimit: panel.service ? panel.service.scanLimit : 500
+  readonly property bool videosTruncated: panel.service ? panel.service.videosTruncated === true : false
+  readonly property var videos: panel.service ? (panel.service.availableVideos || []) : []
 
-  function rescan() { scanProc.running = true }
+  function rescan() { if (panel.service) panel.service.rescanLibrary() }
 
   Component.onCompleted: { rescan(); resetScope() }
 
@@ -143,71 +142,87 @@ Item {
     }
   }
 
-  // The shell process is long-lived, so nothing here may grow with the user's
-  // video folder — not the buffer, not the list, not the traversal, and not
-  // how long the scan is allowed to take.
-  //
-  // Capping matches alone is not enough, which is the trap the first attempt
-  // fell into. `head` can only kill the producer once the producer has
-  // *emitted* enough lines, so a folder of a million non-videos yields nothing
-  // to cap and gets walked in full. Three separate bounds are needed:
-  //
-  //   * `ls -U` streams entries in directory order and is cut off by
-  //     `head -n entryLimit`, so the number of entries EXAMINED is bounded,
-  //     not just the number matched;
-  //   * the extension filter runs before any `stat`, so at most `scanLimit`
-  //     files per directory are ever tested with `[ -f ]`;
-  //   * `timeout` puts a hard ceiling on the process's lifetime whatever the
-  //     filesystem does — a slow or hung mount cannot pin the scan open.
-  //
-  // Arguments go in as positional parameters rather than interpolated into the
-  // script text, so no path can alter the command.
-  readonly property string scanScript:
-    'lim=$1; emax=$2\n' +
-    'for d in "$HOME/Videos/Wallpapers" "$HOME/Videos"; do\n' +
-    '  [ -d "$d" ] || continue\n' +
-    '  entries=$(ls -U -1 -- "$d" 2>/dev/null | head -n "$emax")\n' +
-    '  [ -n "$entries" ] || continue\n' +
-    '  if [ "$(printf "%s\\n" "$entries" | wc -l)" -ge "$emax" ]; then\n' +
-    '    printf "TRUNC\\n" >&2\n' +
-    '  fi\n' +
-    '  printf "%s\\n" "$entries" |\n' +
-    '    grep -iE "\\.(mp4|mkv|webm|mov|avi)$" | head -n "$lim" |\n' +
-    '    while IFS= read -r f; do\n' +
-    '      [ -f "$d/$f" ] && printf "%s/%s\\n" "$d" "$f"\n' +
-    '    done\n' +
-    'done | sort -u | head -n "$lim"\n'
+  // ---- speed + rotation reads -------------------------------------------
+  // All of these read THROUGH the service, so the panel shows live truth even
+  // when the CLI changed something while the dropdown was open.
+  readonly property real minSpeed: panel.service ? Number(panel.service.minSpeed) : 0.25
+  readonly property real maxSpeed: panel.service ? Number(panel.service.maxSpeed) : 2.0
 
-  Process {
-    id: scanProc
-    command: ["timeout", "-k", "1", String(panel.scanSeconds),
-              "bash", "-c", panel.scanScript, "_",
-              String(panel.scanLimit + 1), String(panel.entryLimit)]
-    // Hitting the entry cap exits 0, so it would otherwise truncate in
-    // silence — which reads as "there was nothing else", a worse lie than a
-    // cap. The script says so on stderr; a non-zero exit (the deadline firing,
-    // or the pipeline cut short) is the other way the view can be partial.
-    onExited: function(code) { if (code !== 0) panel.videosTruncated = true }
-    stderr: StdioCollector {
-      onStreamFinished: if (String(text || "").indexOf("TRUNC") !== -1) panel.videosTruncated = true
-    }
-    stdout: StdioCollector {
-      onStreamFinished: {
-        var seen = ({})
-        var list = []
-        panel.videosTruncated = false
-        var lines = String(text || "").split("\n")
-        for (var i = 0; i < lines.length; i++) {
-          var p = lines[i].trim()
-          if (!p || seen[p]) continue
-          seen[p] = true
-          if (list.length >= panel.scanLimit) { panel.videosTruncated = true; break }
-          list.push({ path: p, name: p.split("/").pop() })
-        }
-        panel.videos = list
-      }
-    }
+  // Reference marks at the round speeds.
+  readonly property var speedMarks: [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+
+  // < 0 unless a drag is in flight, so the readout follows the knob.
+  property real pendingSpeed: -1
+
+  readonly property real serviceSpeed: {
+    var v = panel.service ? Number(panel.service.playbackSpeed) : 1
+    return (isFinite(v) && v > 0) ? v : 1
   }
+
+  readonly property real speedValue: panel.pendingSpeed >= 0 ? panel.pendingSpeed
+                                                             : panel.serviceSpeed
+
+  function roundSpeed(v) { return Math.round(Number(v) * 100) / 100 }
+
+  // Trailing zeros dropped: 1x, 0.5x, 0.66x — never 1.00x.
+  readonly property string speedLabel: {
+    var n = panel.roundSpeed(panel.speedValue)
+    var t = n.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")
+    return t + "x"
+  }
+
+  // Rotation reads follow the SCREEN selector: "all" is the global default,
+  // a screen is its effective settings (own profile, else inherited). Reading
+  // the service's screenPlans is what makes these live.
+  readonly property var scopePlan: {
+    if (!panel.service || panel.scope === "all") return null
+    var plans = panel.service.screenPlans || ({})
+    return plans[panel.scope] || null
+  }
+
+  readonly property string rotationMode:
+    panel.scope === "all" ? (panel.service ? String(panel.service.rotationMode || "off") : "off")
+                          : (panel.scopePlan ? String(panel.scopePlan.mode) : "off")
+
+  readonly property string rotationOrder:
+    panel.scope === "all" ? (panel.service ? String(panel.service.rotationOrder || "shuffle") : "shuffle")
+                          : (panel.scopePlan ? String(panel.scopePlan.order) : "shuffle")
+
+  readonly property int rotationInterval:
+    panel.scope === "all" ? (panel.service ? Number(panel.service.rotationInterval || 10) : 10)
+                          : (panel.scopePlan ? Number(panel.scopePlan.interval) : 10)
+
+  // True when this screen has been given settings of its own.
+  readonly property bool scopeHasOwnProfile: panel.scopePlan ? panel.scopePlan.own === true : false
+
+  readonly property var intervalOptions: [
+    { value: "1",  label: "1 minute"   },
+    { value: "2",  label: "2 minutes"  },
+    { value: "5",  label: "5 minutes"  },
+    { value: "10", label: "10 minutes" },
+    { value: "15", label: "15 minutes" },
+    { value: "30", label: "30 minutes" },
+    { value: "60", label: "1 hour"     }
+  ]
+
+  // Full path as the value, bare filename as the label.
+  readonly property var playlistOptions: {
+    var out = []
+    var v = panel.videos || []
+    for (var i = 0; i < v.length; i++)
+      out.push({ value: String(v[i].path), label: String(v[i].name) })
+    return out
+  }
+
+  readonly property var playlistValues: {
+    var out = []
+    if (!panel.service) return out
+    var pl = panel.scope === "all" ? (panel.service.playlist || [])
+                                   : (panel.scopePlan ? panel.scopePlan.playlist : [])
+    for (var i = 0; i < pl.length; i++) out.push(String(pl[i]))
+    return out
+  }
+
 
   implicitWidth: Style.space(320)
   implicitHeight: col.implicitHeight
@@ -297,6 +312,187 @@ Item {
       foreground: panel.fg
       checked: panel.service ? panel.service.pauseOnFullscreen === true : true
       onClicked: if (panel.widget) panel.widget.setPauseOnFullscreen(!checked)
+    }
+
+    // ---------- playback speed ----------
+    PanelSeparator { foreground: panel.fg }
+
+    PanelSectionHeader {
+      text: "SPEED"
+      foreground: panel.fg
+      fontFamily: panel.fontFamily
+    }
+
+    // Free over the whole range at 2-decimal precision; the ticks are just
+    // visual anchors at the round speeds.
+    Row {
+      width: parent.width
+      spacing: Style.spacing.controlGap
+
+      PanelSlider {
+        id: speedSlider
+        bar: panel.bar
+        width: parent.width - speedReadout.width - Style.spacing.controlGap
+        anchors.verticalCenter: parent.verticalCenter
+        minimum: panel.minSpeed
+        maximum: panel.maxSpeed
+        // PanelSlider ignores `step` and only quantises when `integer` is
+        // set, so the 2-decimal rounding is applied here.
+        integer: false
+        tickCount: panel.speedMarks.length
+        value: panel.speedValue
+        onMoved: function(v) {
+          panel.pendingSpeed = panel.roundSpeed(v)
+          // Live preview without writing state.json on every pixel; the
+          // release below is what persists.
+          if (panel.service) panel.service.playbackSpeed = panel.pendingSpeed
+        }
+        onReleased: function(v) {
+          var final = panel.roundSpeed(v)
+          panel.pendingSpeed = -1
+          if (panel.widget) panel.widget.setSpeed(final)
+        }
+      }
+
+      Text {
+        id: speedReadout
+        textFormat: Text.PlainText
+        anchors.verticalCenter: parent.verticalCenter
+        // Sized to the widest label so the slack goes back to the slider.
+        width: speedMetrics.width
+        horizontalAlignment: Text.AlignRight
+        text: panel.speedLabel
+        color: panel.fg
+        font.family: panel.fontFamily
+        font.pixelSize: Style.font.subtitle
+        font.bold: true
+      }
+
+      TextMetrics {
+        id: speedMetrics
+        font.family: panel.fontFamily
+        font.pixelSize: Style.font.subtitle
+        font.bold: true
+        text: "0.25x"
+      }
+    }
+
+    // ---------- rotation ----------
+    PanelSeparator { foreground: panel.fg }
+
+    PanelSectionHeader {
+      text: !panel.multiScreen ? "ROTATION"
+          : (panel.scope === "all" ? "ROTATION · ALL SCREENS" : "ROTATION · " + panel.scope)
+      foreground: panel.fg
+      fontFamily: panel.fontFamily
+    }
+
+    // The same controls mean two different things depending on scope.
+    Text {
+      textFormat: Text.PlainText
+      visible: panel.multiScreen
+      width: parent.width
+      text: panel.scope === "all"
+          ? "Shared default. Screens with their own settings ignore this."
+          : (panel.scopeHasOwnProfile ? panel.scope + " has its own settings."
+                                      : panel.scope + " follows the shared default — changing anything here gives it its own.")
+      color: panel.dim
+      font.family: panel.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      wrapMode: Text.WordWrap
+    }
+
+    Dropdown {
+      id: rotModeDropdown
+      width: parent.width
+      label: "MODE"
+      options: [
+        { value: "off",      label: "Off — one video" },
+        { value: "all",      label: "Rotate all videos" },
+        { value: "selected", label: "Rotate chosen videos" }
+      ]
+      value: panel.rotationMode
+      onChanged: function(v) {
+        if (panel.widget) panel.widget.setRotation(String(v), panel.rotationOrder, panel.rotationInterval, panel.scope)
+      }
+    }
+
+    // Hidden until rotation is on rather than offering settings that do nothing.
+    ButtonGroup {
+      width: parent.width
+      visible: panel.rotationMode !== "off"
+      foreground: panel.fg
+      fontFamily: panel.fontFamily
+      options: [
+        { value: "shuffle",    label: "Shuffle" },
+        { value: "sequential", label: "In order" }
+      ]
+      value: panel.rotationOrder
+      onChanged: function(v) {
+        if (panel.widget) panel.widget.setRotation(panel.rotationMode, String(v), panel.rotationInterval, panel.scope)
+      }
+    }
+
+    Dropdown {
+      id: rotIntervalDropdown
+      width: parent.width
+      visible: panel.rotationMode !== "off"
+      label: "CHANGE EVERY"
+      options: panel.intervalOptions
+      value: String(panel.rotationInterval)
+      onChanged: function(v) {
+        if (panel.widget) panel.widget.setRotation(panel.rotationMode, panel.rotationOrder, Number(v), panel.scope)
+      }
+    }
+
+    MultiSelect {
+      id: playlistSelect
+      width: parent.width
+      visible: panel.rotationMode === "selected"
+      label: "VIDEOS IN ROTATION"
+      noSelectionText: "None chosen — nothing will rotate"
+      emptyText: "Drop clips in ~/Videos"
+      foreground: panel.fg
+      fontFamily: panel.fontFamily
+      options: panel.playlistOptions
+      values: panel.playlistValues
+      onChanged: function(vals) { if (panel.widget) panel.widget.setPlaylist(vals, panel.scope) }
+    }
+
+    Row {
+      width: parent.width
+      spacing: Style.spacing.controlGap
+
+      Button {
+        visible: panel.rotationMode !== "off"
+        foreground: panel.fg
+        fontFamily: panel.fontFamily
+        iconText: "󰒭"
+        text: "Next video"
+        bordered: true
+        onClicked: if (panel.widget) panel.widget.nextVideo(panel.scope)
+      }
+
+      Button {
+        visible: panel.scopeHasOwnProfile
+        foreground: panel.fg
+        fontFamily: panel.fontFamily
+        iconText: "󰑐"
+        text: "Follow default"
+        bordered: true
+        onClicked: if (panel.widget) panel.widget.clearRotation(panel.scope)
+      }
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      visible: panel.rotationMode === "selected" && panel.playlistValues.length === 0
+      width: parent.width
+      text: "Pick at least one video above, or rotation stays on the current clip."
+      color: panel.dim
+      font.family: panel.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      wrapMode: Text.WordWrap
     }
 
     // ---------- video library ----------
