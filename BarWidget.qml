@@ -82,6 +82,10 @@ BarWidget {
     if (service) service.applySetOutput(name)
     else ipc("setOutput", name)
   }
+  function setSpeed(v) {
+    if (service) service.applySetSpeed(v)
+    else ipc("setSpeed", String(v))
+  }
   function setPauseOnFullscreen(on) {
     if (service) service.applySetPauseOnFullscreen(on ? "true" : "false")
     else ipc("setPauseOnFullscreen", on ? "true" : "false")

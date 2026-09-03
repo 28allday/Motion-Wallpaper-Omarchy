@@ -47,7 +47,7 @@ Two sources, with a deliberate split:
   `Service.qml`'s `pluginConfig` falls back to `{}` when there is no entry, so
   every setting has a working default and the plugin runs without one.
 - **`~/.local/state/motion-wallpaper/state.json`** is the runtime truth. IPC
-  mutations (play/stop/toggle, screen, auto-pause) write it, so they survive a
+  mutations (play/stop/toggle, screen, auto-pause, speed) write it, so they survive a
   shell restart and a reboot. Editing the config entry re-seeds the state file.
 
 That split is why there is no autostart step: `play` means it returns after a
@@ -99,6 +99,18 @@ means what it says (and self-heals a stale `output` left by the CLI).
 click would flatten a per-screen setup — so the panel opens aimed at its own
 monitor instead. The bar mounts one widget per screen, so "its own monitor" is
 `button.QsWindow.window.screen.name`, surfaced as `screenName` on the widget.
+
+### Playback speed
+
+`playbackSpeed` on the service is bound to `playbackRate` on both players of
+every surface, so the A/B cross-fade pair stay in step. `safeSpeed()` clamps
+into `minSpeed`..`maxSpeed` and rounds to two decimals rather than snapping to
+a fixed set — a hand-edited `state.json` still cannot drive the decoder out of
+range, but any value inside it is honoured.
+
+The panel drives `playbackSpeed` directly while the slider is dragged and only
+calls `applySetSpeed` on release. A drag would otherwise write `state.json` on
+every pixel.
 
 ### Cross-fade on clip change
 
