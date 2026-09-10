@@ -941,21 +941,27 @@ Item {
   // QtMultimedia's FFmpeg backend picks a HW decode backend automatically when
   // one initialises (QT_FFMPEG_DECODING_HW_DEVICE_TYPES overrides the priority
   // when set). The plugin cannot flip the backend of a running shell, so this
-  // only detects and surfaces: which backends ffmpeg lists, whether VAAPI
-  // actually initialises, and why software fallback is in effect. The panel
-  // and the CLI read it via hwStatusObject().
+  // only detects and surfaces: which backends ffmpeg lists, which GPU vendor
+  // is present, whether that vendor's init actually works (VAAPI for
+  // Intel/AMD, CUDA for NVIDIA), and why software fallback is in effect. The
+  // panel and the CLI read it via hwStatusObject().
   property var hwSupported: []
   property string hwWorking: ""
   property string hwEnvOverride: ""
   property string hwReason: ""
   property bool hwChecked: false
+  property string hwVendor: "unknown"   // intel | amd | nvidia | hybrid | unknown
+  property var hwBackends: ({})         // { vaapi: ok|fail, cuda: ok|fail|skipped }
   readonly property bool hwSoftwareFallback: hwChecked && hwWorking === ""
 
   readonly property string hwProbeScript:
     'sup=$(ffmpeg -hide_banner -hwaccels 2>/dev/null | tail -n +2 | tr "\\n" "," | sed "s/,$//"); echo "SUPPORTED=$sup"; ' +
+    'ven=""; for d in /sys/class/drm/renderD*/device/vendor; do [ -f "$d" ] && ven="$ven,$(cat "$d" 2>/dev/null)"; done; echo "VENDORS=$ven"; ' +
+    'nv=no; [ -e /dev/nvidia0 ] && nv=yes; case "$ven" in *10de*) nv=yes;; esac; echo "NVIDIA_PRESENT=$nv"; ' +
     'if [ -e /dev/dri/renderD128 ] || [ -e /dev/dri/renderD129 ]; then echo "RENDER_NODE=yes"; else echo "RENDER_NODE=no"; fi; ' +
     'if [ -f /usr/lib/dri/iHD_drv_video.so ] || [ -f /usr/lib/dri/i965_drv_video.so ]; then echo "INTEL_DRIVER=yes"; else echo "INTEL_DRIVER=no"; fi; ' +
-    'if ffmpeg -hide_banner -v error -init_hw_device vaapi=va:/dev/dri/renderD128 -f lavfi -i nullsrc=s=64x64:d=0.1 -f null - >/dev/null 2>&1; then echo "VAAPI_INIT=ok"; else echo "VAAPI_INIT=fail"; fi'
+    'if ffmpeg -hide_banner -v error -init_hw_device vaapi=va:/dev/dri/renderD128 -f lavfi -i nullsrc=s=64x64:d=0.1 -f null - >/dev/null 2>&1; then echo "VAAPI_INIT=ok"; else echo "VAAPI_INIT=fail"; fi; ' +
+    'if [ "$nv" = "yes" ]; then if ffmpeg -hide_banner -v error -init_hw_device cuda -f lavfi -i nullsrc=s=64x64:d=0.1 -f null - >/dev/null 2>&1; then echo "CUDA_INIT=ok"; else echo "CUDA_INIT=fail"; fi; else echo "CUDA_INIT=skipped"; fi'
 
   function refreshHwAccel() {
     if (hwProbeProc.running) return
@@ -967,6 +973,8 @@ Item {
     return {
       checked: root.hwChecked,
       supported: root.hwSupported,
+      vendor: root.hwVendor,
+      backends: root.hwBackends,
       working: root.hwWorking,
       envOverride: root.hwEnvOverride,
       softwareFallback: root.hwSoftwareFallback,
@@ -979,14 +987,19 @@ Item {
     if (raw === "") {
       root.hwSupported = []
       root.hwWorking = ""
+      root.hwVendor = "unknown"
+      root.hwBackends = ({})
       root.hwReason = "probe timed out — assuming software decode"
       root.hwChecked = true
       return
     }
     var supported = []
+    var vendors = ""
+    var nvidiaPresent = ""
     var renderNode = ""
     var intelDriver = ""
     var vaapiInit = ""
+    var cudaInit = ""
     var lines = raw.split("\n")
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim()
@@ -996,26 +1009,62 @@ Item {
           var p = parts[j].trim()
           if (p !== "") supported.push(p)
         }
+      } else if (line.indexOf("VENDORS=") === 0) {
+        vendors = line.substring(8).trim()
+      } else if (line.indexOf("NVIDIA_PRESENT=") === 0) {
+        nvidiaPresent = line.substring(15).trim()
       } else if (line.indexOf("VAAPI_INIT=") === 0) {
         vaapiInit = line.substring(11).trim()
+      } else if (line.indexOf("CUDA_INIT=") === 0) {
+        cudaInit = line.substring(10).trim()
       } else if (line.indexOf("RENDER_NODE=") === 0) {
         renderNode = line.substring(12).trim()
       } else if (line.indexOf("INTEL_DRIVER=") === 0) {
         intelDriver = line.substring(13).trim()
       }
     }
+    // Vendor from PCI IDs seen on the DRM render nodes, plus the proprietary
+    // NVIDIA device node (which exists even where DRM nodes do not).
+    var low = vendors.toLowerCase()
+    var hasIntel = low.indexOf("8086") !== -1
+    var hasAmd = low.indexOf("1002") !== -1
+    var hasNvidia = nvidiaPresent === "yes" || low.indexOf("10de") !== -1
+    var n = (hasIntel ? 1 : 0) + (hasAmd ? 1 : 0) + (hasNvidia ? 1 : 0)
+    var vendor = "unknown"
+    if (n > 1) vendor = "hybrid"
+    else if (hasIntel) vendor = "intel"
+    else if (hasAmd) vendor = "amd"
+    else if (hasNvidia) vendor = "nvidia"
+    root.hwVendor = vendor
+    root.hwBackends = {
+      vaapi: vaapiInit !== "" ? vaapiInit : "unknown",
+      cuda: cudaInit !== "" ? cudaInit : "unknown"
+    }
     root.hwSupported = supported
     var env = String(root.hwEnvOverride || "")
     if (env === ",") {
       root.hwWorking = ""
       root.hwReason = "HW decode disabled via QT_FFMPEG_DECODING_HW_DEVICE_TYPES=, — software decode"
-    } else if (vaapiInit === "ok") {
+    } else if (vaapiInit === "ok" && vendor !== "nvidia") {
       root.hwWorking = "vaapi"
       root.hwReason = ""
+    } else if (cudaInit === "ok") {
+      root.hwWorking = "cuda"
+      root.hwReason = ""
+    } else if (vaapiInit === "ok") {
+      // NVIDIA box with a VAAPI shim (e.g. nvidia-vaapi-driver).
+      root.hwWorking = "vaapi"
+      root.hwReason = ""
+    } else if (vendor === "nvidia" || vendor === "hybrid") {
+      root.hwWorking = ""
+      root.hwReason = "no working HW backend (cuda: " + (cudaInit || "?") + ", vaapi: " + (vaapiInit || "?") + ") — software decode; on NVIDIA this usually means the proprietary driver (nvidia-utils) is missing"
+    } else if (vendor === "amd") {
+      root.hwWorking = ""
+      root.hwReason = "VAAPI init failed (AMD decodes via Mesa — check libva-mesa-driver) — software decode"
     } else if (renderNode !== "yes") {
       root.hwWorking = ""
       root.hwReason = "no /dev/dri render node — software decode"
-    } else if (intelDriver !== "yes") {
+    } else if (vendor === "intel" && intelDriver !== "yes") {
       root.hwWorking = ""
       root.hwReason = "VAAPI init failed, Intel VAAPI driver missing (install intel-media-driver) — software decode"
     } else {

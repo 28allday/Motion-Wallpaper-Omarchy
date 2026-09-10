@@ -327,7 +327,7 @@ cmd_hwaccel() {
   require_cmd jq
   require_plugin
   local j; j="$(ipc hwaccel 2>/dev/null || echo '{}')"
-  jq -r '"supported:  " + ((.supported // []) | join(", ")), "working:    " + ((.working // "") | if . == "" then "(software)" else . end), "env:        " + (.envOverride // ""), "fallback:   " + ((.softwareFallback // false) | tostring), "reason:     " + (.reason // ""), "checked:    " + ((.checked // false) | tostring)' <<<"$j"
+  jq -r '"supported:  " + ((.supported // []) | join(", ")), "vendor:     " + (.vendor // "unknown"), "backends:   vaapi=" + ((.backends // {}).vaapi // "?") + " cuda=" + ((.backends // {}).cuda // "?"), "working:    " + ((.working // "") | if . == "" then "(software)" else . end), "env:        " + (.envOverride // ""), "fallback:   " + ((.softwareFallback // false) | tostring), "reason:     " + (.reason // ""), "checked:    " + ((.checked // false) | tostring)' <<<"$j"
 }
 
 case "${1:-status}" in

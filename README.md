@@ -244,7 +244,7 @@ Anything QtMultimedia's FFmpeg backend can decode — `.mp4`, `.mkv`, `.webm`, `
 
 Video wallpaper decodes continuously on the GPU, so it uses more power than a static image. The fullscreen auto-pause keeps games and full-screen video from paying that cost. For laptops on battery, consider `motion-wallpaper stop` or a shorter/lower-bitrate clip.
 
-QtMultimedia picks a hardware decode backend automatically when one initialises. The plugin probes this at startup (ffmpeg `hwaccels` + a VAAPI init test + `/dev/dri` render node + Intel VAAPI driver files) and surfaces it via `motion-wallpaper hwaccel` and `motion-wallpaper status` (plus a panel hint when software fallback is active while playing). If it reports software fallback with `install intel-media-driver`, that package is the fix on Intel iGPUs; `QT_FFMPEG_DECODING_HW_DEVICE_TYPES` overrides the backend priority when set.
+QtMultimedia picks a hardware decode backend automatically when one initialises. The plugin probes this at startup (ffmpeg `hwaccels`, the GPU vendor from the DRM render nodes, a VAAPI init test, plus a CUDA init test on NVIDIA) and surfaces it via `motion-wallpaper hwaccel` and `motion-wallpaper status` (plus a panel hint when software fallback is active while playing). If it reports software fallback, the hint names the usual fix for your vendor (`intel-media-driver` on Intel, `libva-mesa-driver` on AMD, the proprietary driver / `nvidia-utils` on NVIDIA); `QT_FFMPEG_DECODING_HW_DEVICE_TYPES` overrides the backend priority when set.
 
 ## Troubleshooting
 
