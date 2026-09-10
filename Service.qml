@@ -937,6 +937,106 @@ Item {
   // Initial fullscreen probe once things settle.
   Timer { interval: 400; running: true; repeat: false; onTriggered: root.refreshFullscreen() }
 
+  // ------------------------------------------------- hardware acceleration
+  // QtMultimedia's FFmpeg backend picks a HW decode backend automatically when
+  // one initialises (QT_FFMPEG_DECODING_HW_DEVICE_TYPES overrides the priority
+  // when set). The plugin cannot flip the backend of a running shell, so this
+  // only detects and surfaces: which backends ffmpeg lists, whether VAAPI
+  // actually initialises, and why software fallback is in effect. The panel
+  // and the CLI read it via hwStatusObject().
+  property var hwSupported: []
+  property string hwWorking: ""
+  property string hwEnvOverride: ""
+  property string hwReason: ""
+  property bool hwChecked: false
+  readonly property bool hwSoftwareFallback: hwChecked && hwWorking === ""
+
+  readonly property string hwProbeScript:
+    'sup=$(ffmpeg -hide_banner -hwaccels 2>/dev/null | tail -n +2 | tr "\\n" "," | sed "s/,$//"); echo "SUPPORTED=$sup"; ' +
+    'if [ -e /dev/dri/renderD128 ] || [ -e /dev/dri/renderD129 ]; then echo "RENDER_NODE=yes"; else echo "RENDER_NODE=no"; fi; ' +
+    'if [ -f /usr/lib/dri/iHD_drv_video.so ] || [ -f /usr/lib/dri/i965_drv_video.so ]; then echo "INTEL_DRIVER=yes"; else echo "INTEL_DRIVER=no"; fi; ' +
+    'if ffmpeg -hide_banner -v error -init_hw_device vaapi=va:/dev/dri/renderD128 -f lavfi -i nullsrc=s=64x64:d=0.1 -f null - >/dev/null 2>&1; then echo "VAAPI_INIT=ok"; else echo "VAAPI_INIT=fail"; fi'
+
+  function refreshHwAccel() {
+    if (hwProbeProc.running) return
+    root.hwEnvOverride = String(Quickshell.env("QT_FFMPEG_DECODING_HW_DEVICE_TYPES") || "")
+    hwProbeProc.running = true
+  }
+
+  function hwStatusObject() {
+    return {
+      checked: root.hwChecked,
+      supported: root.hwSupported,
+      working: root.hwWorking,
+      envOverride: root.hwEnvOverride,
+      softwareFallback: root.hwSoftwareFallback,
+      reason: root.hwReason
+    }
+  }
+
+  function parseHwProbe(text) {
+    var raw = String(text || "").trim()
+    if (raw === "") {
+      root.hwSupported = []
+      root.hwWorking = ""
+      root.hwReason = "probe timed out — assuming software decode"
+      root.hwChecked = true
+      return
+    }
+    var supported = []
+    var renderNode = ""
+    var intelDriver = ""
+    var vaapiInit = ""
+    var lines = raw.split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim()
+      if (line.indexOf("SUPPORTED=") === 0) {
+        var parts = line.substring(10).split(",")
+        for (var j = 0; j < parts.length; j++) {
+          var p = parts[j].trim()
+          if (p !== "") supported.push(p)
+        }
+      } else if (line.indexOf("VAAPI_INIT=") === 0) {
+        vaapiInit = line.substring(11).trim()
+      } else if (line.indexOf("RENDER_NODE=") === 0) {
+        renderNode = line.substring(12).trim()
+      } else if (line.indexOf("INTEL_DRIVER=") === 0) {
+        intelDriver = line.substring(13).trim()
+      }
+    }
+    root.hwSupported = supported
+    var env = String(root.hwEnvOverride || "")
+    if (env === ",") {
+      root.hwWorking = ""
+      root.hwReason = "HW decode disabled via QT_FFMPEG_DECODING_HW_DEVICE_TYPES=, — software decode"
+    } else if (vaapiInit === "ok") {
+      root.hwWorking = "vaapi"
+      root.hwReason = ""
+    } else if (renderNode !== "yes") {
+      root.hwWorking = ""
+      root.hwReason = "no /dev/dri render node — software decode"
+    } else if (intelDriver !== "yes") {
+      root.hwWorking = ""
+      root.hwReason = "VAAPI init failed, Intel VAAPI driver missing (install intel-media-driver) — software decode"
+    } else {
+      root.hwWorking = ""
+      root.hwReason = "VAAPI init failed — software decode"
+    }
+    root.hwChecked = true
+  }
+
+  Process {
+    id: hwProbeProc
+    command: root.timeoutPrefix.concat(["bash", "-c", root.hwProbeScript])
+    stdout: StdioCollector {
+      onStreamFinished: root.parseHwProbe(text)
+    }
+    onExited: if (!root.hwChecked) root.parseHwProbe("")
+  }
+
+  // Probe shortly after startup: cheap and off the state-load critical path.
+  Timer { interval: 900; running: true; repeat: false; onTriggered: root.refreshHwAccel() }
+
   // ---------------------------------------------------------------- render
   Variants {
     model: root.activeScreens
@@ -1148,6 +1248,7 @@ Item {
       screens: root.screensObject(),
       pauseOnFullscreen: root.pauseOnFullscreen,
       manualPaused: root.manualPaused,
+      hwaccel: root.hwStatusObject(),
       activeScreens: (function () {
         var a = []
         for (var i = 0; i < root.activeScreens.length; i++) a.push(String(root.activeScreens[i].name))
@@ -1557,6 +1658,13 @@ Item {
 
     function followGlobalPlayback(screen: string): string {
       return JSON.stringify(root.applyClearScreenPlayback(screen))
+    }
+
+    // HW decode probe: which backends ffmpeg lists, whether VAAPI init works,
+    // and why software fallback is in effect. Re-probes when never checked.
+    function hwaccel(): string {
+      if (!root.hwChecked) root.refreshHwAccel()
+      return JSON.stringify(root.hwStatusObject())
     }
 
     function ping(): string { return "ok" }

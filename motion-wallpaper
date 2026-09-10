@@ -150,6 +150,13 @@ cmd_status() {
   printf 'video:      %s\n' "${video:-(none)}"
   printf 'screen:     %s\n' "$output"
   printf 'auto-pause: %s\n' "$([ "$pause" = "true" ] && echo on || echo off)"
+  local hw; hw="$(jq -r '.hwaccel // empty | if .checked then ((.working // "") + "|" + (.reason // "")) else "" end' <<<"$j")"
+  if [ -n "$hw" ]; then
+    local working="${hw%%|*}" reason="${hw#*|}"
+    if [ -n "$working" ]; then printf 'hw-decode:  %s\n' "$working"
+    elif [ -n "$reason" ]; then printf 'hw-decode:  software (%s)\n' "$reason"
+    else printf 'hw-decode:  software\n'; fi
+  fi
   if [ "${nscreens:-0}" -gt 1 ] || [ "${noverrides:-0}" -gt 0 ]; then
     printf 'screens:\n'
     screens_table <<<"$j" | while IFS=$'\t' read -r name state clip; do
@@ -316,6 +323,13 @@ cmd_follow() {
   esac
 }
 
+cmd_hwaccel() {
+  require_cmd jq
+  require_plugin
+  local j; j="$(ipc hwaccel 2>/dev/null || echo '{}')"
+  jq -r '"supported:  " + ((.supported // []) | join(", ")), "working:    " + ((.working // "") | if . == "" then "(software)" else . end), "env:        " + (.envOverride // ""), "fallback:   " + ((.softwareFallback // false) | tostring), "reason:     " + (.reason // ""), "checked:    " + ((.checked // false) | tostring)' <<<"$j"
+}
+
 case "${1:-status}" in
   status|"") cmd_status ;;
   screens)   cmd_screens ;;
@@ -333,6 +347,7 @@ case "${1:-status}" in
   playlist)  shift; cmd_playlist "$@" ;;
   next)      shift; cmd_next "${1:-}" ;;
   follow)    shift; cmd_follow "${1:-}" "${2:-}" ;;
+  hwaccel)   cmd_hwaccel ;;
   -h|--help)
     cat <<USAGE
 $APP_NAME — control the omarchy-shell video wallpaper plugin.
@@ -341,6 +356,7 @@ The interactive UI is the bar widget + panel (click the film icon in the bar).
 Usage: ${0##*/} [command]
   status                Print current state, per monitor (default).
   screens               List each monitor and the clip it is showing.
+  hwaccel               Show HW decode probe (VAAPI init, fallback reason).
   play <file> [screen]  Start a video everywhere, or on one monitor.
   play <screen>         Restart one monitor after `stop <screen>`.
   off <screen>          Blank one monitor; the others keep playing.

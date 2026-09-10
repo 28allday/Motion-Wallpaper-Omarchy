@@ -343,6 +343,25 @@ Item {
       onClicked: if (panel.widget) panel.widget.setPauseOnFullscreen(!checked)
     }
 
+    // ---------- hw decode warning ----------
+    // Qt auto-uses HW decode when VAAPI initialises; when it does not, a 4K
+    // clip on several monitors burns CPU with no visible error. Surface the
+    // service probe here so it reads as a hint, not a banner. It sits above
+    // the scoped SPEED / ROTATION sections because decode status is global
+    // to the decoder, not per-screen.
+    Text {
+      textFormat: Text.PlainText
+      visible: !!panel.service && panel.service.hwChecked === true
+               && panel.service.hwSoftwareFallback === true
+               && panel.service.enabled === true && panel.service.rendering === true
+      width: parent.width
+      text: "Software decode — high CPU" + (panel.service && panel.service.hwReason !== "" ? ": " + panel.service.hwReason : "")
+      color: "#e5c07b"
+      font.family: panel.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      wrapMode: Text.WordWrap
+    }
+
     // ---------- playback speed ----------
     PanelSeparator { foreground: panel.fg }
 
