@@ -47,7 +47,8 @@ Two sources, with a deliberate split:
   `Service.qml`'s `pluginConfig` falls back to `{}` when there is no entry, so
   every setting has a working default and the plugin runs without one.
 - **`~/.local/state/motion-wallpaper/state.json`** is the runtime truth. IPC
-  mutations (play/stop/toggle, screen, auto-pause, speed, rotation) write it,
+  mutations (play/stop/toggle, screen, auto-pause, speed, rotation, per-screen
+  profiles) write it,
   so they survive a shell restart and a reboot. Editing the config entry
   re-seeds the state file. It also carries `playbackSpeed`, the rotation
   globals and `screenRotation`; all of them are optional, so a state file
@@ -164,6 +165,28 @@ already ran `[ -f ]` on every entry, so trusting it avoids blanking a surface
 for a frame each time rotation swaps in a library clip. But the scan can be up
 to five minutes stale, so `statedPaths` records what the stat actually
 examined: once it has looked at a path and not found it, the stat wins.
+
+### Per-screen playback
+
+`screenRotation` carries `speed`, `off` and `paused` alongside the rotation
+fields, and `screenPlans` resolves them the same way: an entry overrides, no
+entry inherits the global. So the model is one shared default plus an optional
+profile per screen, and a screen with no entry still gets exactly the old
+global-only behaviour.
+
+`pathForScreen()` consults `offFor(name)` rather than the global `enabled`, so a
+screen with its own `off` decides for itself while everything else still obeys
+the global Stop. Each surface reads its own `paused` and `speed` off its plan,
+so `playbackRate` is bound per monitor.
+
+Two details worth keeping:
+
+- `applyPlayScreen()` clears a global Stop first. Otherwise playing one screen
+  would set `off: false` on it and still render nothing, because
+  `pathForScreen()` would fall through to the global.
+- Writing `undefined` removes a field, and an entry left holding nothing is
+  deleted, so `hasOwnProfile()` never reports a profile that no longer says
+  anything.
 
 ### Cross-fade on clip change
 

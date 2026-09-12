@@ -112,6 +112,10 @@ motion-wallpaper pause           # pause / resume
 motion-wallpaper resume
 motion-wallpaper autopause off   # or: on
 motion-wallpaper speed 0.5       # playback speed, 0.25-2 (e.g. 1, 0.66)
+motion-wallpaper stop DP-2       # blank one monitor; the other keeps playing
+motion-wallpaper play DP-2       # and start it again
+motion-wallpaper speed 0.5 DP-1  # speed for just that monitor
+motion-wallpaper follow DP-1     # drop its own settings, follow the default
 ```
 
 ### With a keybind
@@ -157,6 +161,29 @@ A **SPEED** slider in the panel sets how fast the clip plays, anywhere from `0.2
 ```bash
 motion-wallpaper speed 0.5
 ```
+
+### One profile per screen
+
+Everything below the **SCREEN** dropdown follows it: the clip list, rotation, the speed slider, and Play/Stop/Pause. On *All screens* you are editing the shared default; on a named screen you are editing that screen alone.
+
+A screen with no settings of its own follows the shared default, so nothing changes until you give it some. Using any control while a screen is selected gives it its own; a line in the ROTATION section always says which of the two you are editing. To hand a screen back to the shared default, use the CLI:
+
+```bash
+motion-wallpaper follow DP-1              # rotation and playback
+motion-wallpaper follow DP-1 rotation     # or just one half
+```
+
+So one monitor can be stopped, slowed down, or rotating on its own schedule while the other carries on:
+
+```bash
+motion-wallpaper stop DP-2          # DP-1 keeps playing
+motion-wallpaper speed 0.5 DP-1     # only that monitor slows down
+motion-wallpaper pause DP-2         # freeze one screen
+motion-wallpaper play DP-2          # start it again
+motion-wallpaper follow DP-1        # back to the shared default
+```
+
+The global **Stop** still governs every screen that has no profile of its own, so the plugin behaves exactly as before for anyone not using this.
 
 ### Rotation
 

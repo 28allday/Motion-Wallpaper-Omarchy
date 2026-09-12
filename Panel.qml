@@ -79,8 +79,10 @@ Item {
     if (!service) return "Service unavailable"
     if (videoPath === "") return scope === "all" ? "No video selected" : "Screen off"
     if (!videoExists) return "File missing"
-    if (!service.enabled) return "Stopped"
-    if (service.manualPaused) return "Paused"
+    // Scoped, so a screen stopped or paused on its own reads correctly rather
+    // than reporting the global state it is overriding.
+    if (scopedOff) return "Stopped"
+    if (scopedPaused) return "Paused"
     return "Playing"
   }
   // Naming one clip would be a lie while the screens are showing different
@@ -90,9 +92,29 @@ Item {
     return stateText + (videoName !== "" ? "  ·  " + videoName : "")
   }
 
-  readonly property bool isPlaying: !!service && service.enabled && service.rendering === true
-                                    && !service.manualPaused
-  readonly property bool isPaused: !!service && service.enabled && service.manualPaused
+  // Playback reads follow the SCREEN selector, like the clip list and rotation.
+  readonly property bool scopedOff: {
+    if (!service) return true
+    if (panel.scope === "all") return !service.enabled
+    return service.offFor(panel.scope) === true
+  }
+  readonly property bool scopedPaused: {
+    if (!service) return false
+    if (panel.scope === "all") return service.manualPaused === true
+    return service.pausedFor(panel.scope) === true
+  }
+  // True when this screen sets its own Play/Stop/Pause or speed.
+  readonly property bool scopeHasOwnPlayback: {
+    if (!service || panel.scope === "all") return false
+    return service.hasOwnPlayback(panel.scope) === true
+  }
+
+  readonly property bool isPlaying: {
+    if (!service || panel.scopedOff || panel.scopedPaused) return false
+    return panel.scope === "all" ? service.rendering === true
+                                 : service.urlForScreen(panel.scope) !== ""
+  }
+  readonly property bool isPaused: !panel.scopedOff && panel.scopedPaused
 
   // ---- screen options ----------------------------------------------------
   // Each screen is labelled with the clip it is set to, so the dropdown
@@ -109,12 +131,18 @@ Item {
   }
 
   // Do the screens disagree about what they are playing?
+  // Screens count as differing when they show different clips OR when any of
+  // them has a profile of its own. Without the second half a screen that was
+  // stopped or slowed on its own would still open the panel on "All screens",
+  // hiding the difference and aiming the next click at every monitor.
   readonly property bool screensDiffer: {
     if (!service || !multiScreen) return false
     var s = Quickshell.screens
     var first = null
     for (var i = 0; i < s.length; i++) {
-      var p = String(service.configuredPathForScreen(String(s[i].name)) || "")
+      var n = String(s[i].name)
+      if (service.hasOwnProfile(n) || service.hasOwnPlayback(n)) return true
+      var p = String(service.configuredPathForScreen(n) || "")
       if (first === null) first = p
       else if (p !== first) return true
     }
@@ -155,7 +183,9 @@ Item {
   property real pendingSpeed: -1
 
   readonly property real serviceSpeed: {
-    var v = panel.service ? Number(panel.service.playbackSpeed) : 1
+    if (!panel.service) return 1
+    var v = panel.scope === "all" ? Number(panel.service.playbackSpeed)
+                                  : Number(panel.service.speedFor(panel.scope))
     return (isFinite(v) && v > 0) ? v : 1
   }
 
@@ -265,7 +295,7 @@ Item {
         iconText: panel.isPlaying ? "󰏤" : "󰐊"
         text: panel.isPlaying ? "Pause" : (panel.isPaused ? "Resume" : "Play")
         bordered: true
-        onClicked: if (panel.widget) panel.widget.togglePlayPause()
+        onClicked: if (panel.widget) panel.widget.togglePlayPauseScoped(panel.scope)
       }
 
       Button {
@@ -275,8 +305,8 @@ Item {
         iconText: "󰓛"
         text: "Stop"
         bordered: true
-        opacity: (panel.service && panel.service.enabled) ? 1.0 : 0.5
-        onClicked: if (panel.widget) panel.widget.stopPlayback()
+        opacity: panel.scopedOff ? 0.5 : 1.0
+        onClicked: if (panel.widget) panel.widget.stopScoped(panel.scope)
       }
     }
 
@@ -318,7 +348,8 @@ Item {
     PanelSeparator { foreground: panel.fg }
 
     PanelSectionHeader {
-      text: "SPEED"
+      text: !panel.multiScreen ? "SPEED"
+          : (panel.scope === "all" ? "SPEED · ALL SCREENS" : "SPEED · " + panel.scope)
       foreground: panel.fg
       fontFamily: panel.fontFamily
     }
@@ -344,13 +375,15 @@ Item {
         onMoved: function(v) {
           panel.pendingSpeed = panel.roundSpeed(v)
           // Live preview without writing state.json on every pixel; the
-          // release below is what persists.
-          if (panel.service) panel.service.playbackSpeed = panel.pendingSpeed
+          // release below is what persists. Only the global slider can preview
+          // this way - a scoped one has to go through the profile.
+          if (panel.service && panel.scope === "all")
+            panel.service.playbackSpeed = panel.pendingSpeed
         }
         onReleased: function(v) {
           var final = panel.roundSpeed(v)
           panel.pendingSpeed = -1
-          if (panel.widget) panel.widget.setSpeed(final)
+          if (panel.widget) panel.widget.setSpeedScoped(final, panel.scope)
         }
       }
 
@@ -394,8 +427,9 @@ Item {
       width: parent.width
       text: panel.scope === "all"
           ? "Shared default. Screens with their own settings ignore this."
-          : (panel.scopeHasOwnProfile ? panel.scope + " has its own settings."
-                                      : panel.scope + " follows the shared default — changing anything here gives it its own.")
+          : ((panel.scopeHasOwnProfile || panel.scopeHasOwnPlayback)
+              ? panel.scope + " has its own settings."
+              : panel.scope + " follows the shared default — changing anything gives it its own.")
       color: panel.dim
       font.family: panel.fontFamily
       font.pixelSize: Style.font.bodySmall
@@ -433,15 +467,37 @@ Item {
       }
     }
 
-    Dropdown {
-      id: rotIntervalDropdown
+    // The interval and "Next video" share a row: both only exist while rotation
+    // is on, and the dropdown does not need the full width for "15 minutes".
+    Row {
       width: parent.width
+      spacing: Style.spacing.controlGap
       visible: panel.rotationMode !== "off"
-      label: "CHANGE EVERY"
-      options: panel.intervalOptions
-      value: String(panel.rotationInterval)
-      onChanged: function(v) {
-        if (panel.widget) panel.widget.setRotation(panel.rotationMode, panel.rotationOrder, Number(v), panel.scope)
+
+      Dropdown {
+        id: rotIntervalDropdown
+        width: parent.width - nextVideoBtn.width - Style.spacing.controlGap
+        // Match the button, which sizes itself from its text padding and comes
+        // out taller than the 28px control default.
+        rowHeight: nextVideoBtn.height
+        label: "CHANGE EVERY"
+        options: panel.intervalOptions
+        value: String(panel.rotationInterval)
+        onChanged: function(v) {
+          if (panel.widget) panel.widget.setRotation(panel.rotationMode, panel.rotationOrder, Number(v), panel.scope)
+        }
+      }
+
+      // Sits on the dropdown's trigger, not level with its label above it.
+      Button {
+        id: nextVideoBtn
+        anchors.bottom: parent.bottom
+        foreground: panel.fg
+        fontFamily: panel.fontFamily
+        iconText: "󰒭"
+        text: "Next video"
+        bordered: true
+        onClicked: if (panel.widget) panel.widget.nextVideo(panel.scope)
       }
     }
 
@@ -459,30 +515,6 @@ Item {
       onChanged: function(vals) { if (panel.widget) panel.widget.setPlaylist(vals, panel.scope) }
     }
 
-    Row {
-      width: parent.width
-      spacing: Style.spacing.controlGap
-
-      Button {
-        visible: panel.rotationMode !== "off"
-        foreground: panel.fg
-        fontFamily: panel.fontFamily
-        iconText: "󰒭"
-        text: "Next video"
-        bordered: true
-        onClicked: if (panel.widget) panel.widget.nextVideo(panel.scope)
-      }
-
-      Button {
-        visible: panel.scopeHasOwnProfile
-        foreground: panel.fg
-        fontFamily: panel.fontFamily
-        iconText: "󰑐"
-        text: "Follow default"
-        bordered: true
-        onClicked: if (panel.widget) panel.widget.clearRotation(panel.scope)
-      }
-    }
 
     Text {
       textFormat: Text.PlainText
