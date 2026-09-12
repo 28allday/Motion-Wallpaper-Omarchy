@@ -99,6 +99,15 @@ Item {
   }
 
   // Clamp a value to a sane path string, or "" if it cannot be one.
+  // Clamp into range and round to 2 decimals. Rounding keeps the persisted
+  // value tidy and stops a drag from writing 0.6600000000000001.
+  function safeSpeed(v) {
+    var n = Number(v)
+    if (!isFinite(n) || n <= 0) return 1.0
+    n = Math.max(root.minSpeed, Math.min(root.maxSpeed, n))
+    return Math.round(n * 100) / 100
+  }
+
   function safePath(v) {
     if (v === null || v === undefined) return ""
     var t = String(v)
@@ -120,6 +129,12 @@ Item {
   property string output: "all"
   property bool pauseOnFullscreen: true
   property bool manualPaused: false   // set by IPC pause(); cleared by resume()/play()
+  // Playback speed multiplier applied to every surface. Free anywhere in the
+  // range at 2-decimal precision - clamped rather than snapped, so a
+  // hand-edited state.json cannot drive the decoder somewhere absurd.
+  readonly property real minSpeed: 0.25
+  readonly property real maxSpeed: 2.0
+  property real playbackSpeed: 1.0
   // Per-monitor clips: { "HDMI-A-1": "/path/clip.mp4", "DP-2": "" }.
   // A present key wins over videoPath/output for that monitor; "" means the
   // monitor stays on the static wallpaper. Keys for disconnected monitors are
@@ -264,7 +279,8 @@ Item {
       enabled: root.enabled,
       output: root.output,
       pauseOnFullscreen: root.pauseOnFullscreen,
-      screenVideos: root.screenVideos || ({})
+      screenVideos: root.screenVideos || ({}),
+      playbackSpeed: root.playbackSpeed
     }, null, 2) + "\n"
     root.writeState(payload)
   }
@@ -317,6 +333,7 @@ Item {
           root.screenVideos = root.normalizeScreenVideos(o.screenVideos)
           root._stateHadScreens = true
         }
+        if (o.playbackSpeed !== undefined) root.playbackSpeed = root.safeSpeed(o.playbackSpeed)
         return true
       }
     } catch (e) {
@@ -583,6 +600,7 @@ Item {
         id: playerA
         videoOutput: outA
         loops: MediaPlayer.Infinite
+        playbackRate: root.playbackSpeed
         audioOutput: AudioOutput { muted: true; volume: 0 }
         onErrorOccurred: function(err, str) { panel.handleError(playerA, err, str) }
       }
@@ -591,6 +609,7 @@ Item {
         id: playerB
         videoOutput: outB
         loops: MediaPlayer.Infinite
+        playbackRate: root.playbackSpeed
         audioOutput: AudioOutput { muted: true; volume: 0 }
         onErrorOccurred: function(err, str) { panel.handleError(playerB, err, str) }
       }
@@ -722,7 +741,8 @@ Item {
         for (var i = 0; i < root.activeScreens.length; i++) a.push(String(root.activeScreens[i].name))
         return a
       })(),
-      fullscreenMonitors: Object.keys(root.fullscreenMonitors)
+      fullscreenMonitors: Object.keys(root.fullscreenMonitors),
+      playbackSpeed: root.playbackSpeed
     }
   }
 
@@ -855,6 +875,12 @@ Item {
     return root.statusObject()
   }
 
+  function applySetSpeed(v) {
+    root.playbackSpeed = root.safeSpeed(v)
+    root.persistState()
+    return root.statusObject()
+  }
+
   IpcHandler {
     target: "motion-wallpaper"
 
@@ -915,6 +941,10 @@ Item {
 
     function status(): string {
       return JSON.stringify(root.statusObject())
+    }
+
+    function setSpeed(value: string): string {
+      return JSON.stringify(root.applySetSpeed(value))
     }
 
     function ping(): string { return "ok" }

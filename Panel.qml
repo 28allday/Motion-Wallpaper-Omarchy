@@ -132,6 +132,32 @@ Item {
 
   function rescan() { scanProc.running = true }
 
+  // ---- playback speed ----
+  readonly property real minSpeed: panel.service ? Number(panel.service.minSpeed) : 0.25
+  readonly property real maxSpeed: panel.service ? Number(panel.service.maxSpeed) : 2.0
+  // Reference marks at the round speeds.
+  readonly property var speedMarks: [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+
+  // < 0 unless a drag is in flight, so the readout follows the knob.
+  property real pendingSpeed: -1
+
+  readonly property real serviceSpeed: {
+    var v = panel.service ? Number(panel.service.playbackSpeed) : 1
+    return (isFinite(v) && v > 0) ? v : 1
+  }
+
+  readonly property real speedValue: panel.pendingSpeed >= 0 ? panel.pendingSpeed
+                                                             : panel.serviceSpeed
+
+  function roundSpeed(v) { return Math.round(Number(v) * 100) / 100 }
+
+  // Trailing zeros dropped: 1x, 0.5x, 0.66x - never 1.00x.
+  readonly property string speedLabel: {
+    var n = panel.roundSpeed(panel.speedValue)
+    var t = n.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")
+    return t + "x"
+  }
+
   Component.onCompleted: { rescan(); resetScope() }
 
   Connections {
@@ -297,6 +323,69 @@ Item {
       foreground: panel.fg
       checked: panel.service ? panel.service.pauseOnFullscreen === true : true
       onClicked: if (panel.widget) panel.widget.setPauseOnFullscreen(!checked)
+    }
+
+    // ---------- playback speed ----------
+    PanelSeparator { foreground: panel.fg }
+
+    PanelSectionHeader {
+      text: "SPEED"
+      foreground: panel.fg
+      fontFamily: panel.fontFamily
+    }
+
+    // Free over the whole range at 2-decimal precision; the ticks are just
+    // visual anchors at the round speeds.
+    Row {
+      width: parent.width
+      spacing: Style.spacing.controlGap
+
+      PanelSlider {
+        id: speedSlider
+        bar: panel.bar
+        width: parent.width - speedReadout.width - Style.spacing.controlGap
+        anchors.verticalCenter: parent.verticalCenter
+        minimum: panel.minSpeed
+        maximum: panel.maxSpeed
+        // PanelSlider ignores `step` and only quantises when `integer` is
+        // set, so the 2-decimal rounding is applied here.
+        integer: false
+        tickCount: panel.speedMarks.length
+        value: panel.speedValue
+        onMoved: function(v) {
+          panel.pendingSpeed = panel.roundSpeed(v)
+          // Live preview without writing state.json on every pixel; the
+          // release below is what persists.
+          if (panel.service) panel.service.playbackSpeed = panel.pendingSpeed
+        }
+        onReleased: function(v) {
+          var final = panel.roundSpeed(v)
+          panel.pendingSpeed = -1
+          if (panel.widget) panel.widget.setSpeed(final)
+        }
+      }
+
+      Text {
+        id: speedReadout
+        textFormat: Text.PlainText
+        anchors.verticalCenter: parent.verticalCenter
+        // Sized to the widest label so the slack goes back to the slider.
+        width: speedMetrics.width
+        horizontalAlignment: Text.AlignRight
+        text: panel.speedLabel
+        color: panel.fg
+        font.family: panel.fontFamily
+        font.pixelSize: Style.font.subtitle
+        font.bold: true
+      }
+
+      TextMetrics {
+        id: speedMetrics
+        font.family: panel.fontFamily
+        font.pixelSize: Style.font.subtitle
+        font.bold: true
+        text: "0.25x"
+      }
     }
 
     // ---------- video library ----------

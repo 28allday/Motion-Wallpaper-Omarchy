@@ -213,6 +213,15 @@ cmd_autopause() {
   esac
 }
 
+cmd_speed() {
+  require_plugin
+  local v="${1:-}"
+  case "$v" in
+    ""|*[!0-9.]*|*.*.*) err "usage: motion-wallpaper speed <0.25-2>"; exit 1 ;;
+  esac
+  ipc setSpeed "$v" >/dev/null
+}
+
 case "${1:-status}" in
   status|"") cmd_status ;;
   screens)   cmd_screens ;;
@@ -225,6 +234,7 @@ case "${1:-status}" in
   resume)    require_plugin; ipc resume >/dev/null ;;
   screen)    shift; cmd_screen "${1:-}" ;;
   autopause) shift; cmd_autopause "${1:-}" ;;
+  speed)     shift; cmd_speed "${1:-}" ;;
   -h|--help)
     cat <<USAGE
 $APP_NAME — control the omarchy-shell video wallpaper plugin.
@@ -241,6 +251,7 @@ Usage: ${0##*/} [command]
   pause | resume        Pause/resume playback.
   screen <name|all>     Coarse targeting for monitors with no clip of their own.
   autopause <on|off>    Pause video under fullscreen windows.
+  speed <0.25-2>        Playback speed, e.g. 1, 0.5, 0.66.
 
 Different clips on different screens:
   ${0##*/} play ~/Videos/a.mp4 DP-1

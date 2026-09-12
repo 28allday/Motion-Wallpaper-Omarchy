@@ -111,6 +111,7 @@ motion-wallpaper toggle          # flip on/off
 motion-wallpaper pause           # pause / resume
 motion-wallpaper resume
 motion-wallpaper autopause off   # or: on
+motion-wallpaper speed 0.5       # playback speed, 0.25-2 (e.g. 1, 0.66)
 ```
 
 ### With a keybind
@@ -148,6 +149,14 @@ motion-wallpaper screens          # check what landed where
 ```
 
 Connector names come from `hyprctl monitors`. A monitor keeps its clip while it is unplugged, so it comes back to the right one; a monitor you have never set follows the default `videoPath` (and the legacy `motion-wallpaper screen <name|all>` targeting, which only applies to monitors with no clip of their own).
+
+### Playback speed
+
+A **SPEED** slider in the panel sets how fast the clip plays, anywhere from `0.25x` to `2x`. It is free rather than stepped — `0.66` and `0.99` are as reachable as `1` — with tick marks at the round speeds as anchors. Dragging previews live; letting go saves. The speed applies to every monitor.
+
+```bash
+motion-wallpaper speed 0.5
+```
 
 ### Persistence
 
