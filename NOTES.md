@@ -86,9 +86,8 @@ Three consequences worth remembering when editing:
 - **File existence is a map, not a bool.** Several clips can be in play at once,
   so one batched process (`for p in "$@"; do [ -f "$p" ]`) fills
   `existingPaths`, keyed by *resolved* path. `videoFileExists` remains as a
-  derived property because the panel, the bar icon and the CLI still read it.
-- **The bar icon keys off `rendering`** (`activeScreens.length > 0`), not
-  "enabled and the default file exists" — with per-monitor clips the wallpaper
+  derived property for callers asking about the default clip.
+- **Each bar icon reads its own screen’s resolved URL and pause state** — with per-monitor clips the wallpaper
   can be running with `videoPath` empty, or every monitor can have been blanked
   individually.
 
@@ -106,15 +105,17 @@ monitor instead. The bar mounts one widget per screen, so "its own monitor" is
 
 ### Playback speed
 
-`playbackSpeed` on the service is bound to `playbackRate` on both players of
-every surface, so the A/B cross-fade pair stay in step. `safeSpeed()` clamps
+The effective speed from each screen plan is bound to `playbackRate` on both players of
+that surface, so the A/B cross-fade pair stay in step. `safeSpeed()` clamps
 into `minSpeed`..`maxSpeed` and rounds to two decimals rather than snapping to
 a fixed set — a hand-edited `state.json` still cannot drive the decoder out of
 range, but any value inside it is honoured.
 
-The panel drives `playbackSpeed` directly while the slider is dragged and only
-calls `applySetSpeed` on release. A drag would otherwise write `state.json` on
-every pixel.
+The panel uses transient `speedPreviewScope` / `speedPreviewValue` while dragging.
+The selected screen previews through its derived plan; global previews affect
+only screens inheriting speed. Release commits the selected speed. Closing or
+changing scope clears the preview, so another control cannot accidentally
+persist an unfinished drag.
 
 ### Rotation
 
@@ -125,18 +126,18 @@ Settings live in two layers:
 
 - the **globals** (`rotationMode`, `rotationOrder`, `rotationInterval`,
   `playlist`) are what the panel edits under *All screens*;
-- **`screenRotation`** is `{ "DP-1": { mode, order, interval, playlist } }`.
+- **`screenRotation`** is `{ "DP-1": { mode, order, interval, playlist, speed, off, paused } }`.
   A screen with no entry follows the globals.
 
-`rotModeFor` / `rotOrderFor` / `rotIntervalFor` / `rotPlaylistFor` resolve
-override-then-global, and `rotationPoolFor` / `rotationActiveFor` build on
-them. `normalizeScreenRotation()` runs every field through the same validators
+`rotModeFor` / `rotOrderFor` / `rotIntervalFor` / `rotPlaylistFor` read
+the effective values from `screenPlans`. `normalizeScreenRotation()` runs every field through the same validators
 as the globals, on the same reasoning as `normalizeScreenVideos()`.
 
-Because those are functions, QML cannot tell when to re-evaluate a binding that
-calls them. `rotRevision` is an integer bumped on every rotation-shaped change;
-bindings read it as a dependency. It is a workaround, not a design — the
-alternative was mirroring every derived value into its own property per screen.
+`screenPlans` derives each connected screen's effective settings and playable
+pool. The readers above use that property. `seedRotation()` preserves a valid
+current clip and updates its index when the pool changes. Both library and
+selected pools exclude paths known to be missing. A fallback to the first
+usable pool entry prevents transient surface removal before seeding runs.
 
 `rotCurrent` / `rotCursor` are `{ connector: ... }` and deliberately **not**
 persisted: rotation re-seeds on start. Each screen keeps its own cursor, so two
@@ -443,10 +444,14 @@ Two rules that shaped it:
   and the reopen is the unbounded one. One bounded read, then validate what is
   held.
 
-Writes are atomic without `FileView` too: a `mktemp` in the same directory then
-`mv -f` over the target, with the payload passed as a positional parameter. A
-write arriving while one is in flight is held in `_pendingState` and issued on
-exit, so concurrent saves cannot interleave.
+Writes use a `mktemp` in the same directory and `mv -fT` over the target.
+The bounded payload is sent over stdin, because Linux also limits the size of
+an individual argument, below our 256-KiB state limit. `stdinEnabled` is reset
+for each process and closed after queuing the payload; Qt flushes pending data
+before EOF. A write arriving while one is in flight replaces `_pendingState`;
+the newest request is issued on exit. A trap removes temporary files on failure.
+The writer refuses oversized input and directory destinations. Process failures
+are exposed in `persistenceError` and shown in the panel and CLI.
 
 ### state.json is untrusted input
 
@@ -550,3 +555,36 @@ for the most recent failure.
 
 - Decoding runs continuously on the GPU. Auto-pause covers fullscreen windows;
   on battery, stopping or using a shorter, lower-bitrate clip is the bigger win.
+
+## Profile and persistence regressions
+
+`commitState(patch)` checks the complete candidate JSON against the UTF-8 byte
+limit before changing reactive settings. `profileWithFields` checks connector
+names and the profile count at every insertion, and removes empty entries.
+Resetting one half deletes only its fields. Play on one screen never changes
+the global enabled or pause flags. The rendering gate and status use the same
+per-screen resolution.
+
+Playlist input must be an actual array; inspect at most 500 entries, including
+duplicates. An object carrying a huge `length` is not an array and must not
+create an unbounded loop. Prototype-mutating keys are not accepted as connectors. Profile lookups must
+check own properties so other inherited names become plain data entries.
+
+The background scan is gated by requested rotation on a connected, enabled
+screen, not by a nonempty pool. Otherwise an empty library cannot recover.
+Each field edited in the panel is passed independently, preserving inheritance
+for the other fields.
+
+Run `node --test tests/*.test.cjs`. Service tests execute functions and property
+bodies extracted from the current QML, with mock screens and filesystem state.
+The Node harness does not simulate Qt's binding scheduler or video decoders.
+Separate Qt fixtures exercise reactive plans, preview cancellation, missing
+clips, and the production atomic-write script and Process lifecycle in an
+isolated offscreen fixture, including large stdin, queued saves and recovery
+from failed writes. No tests mutate the installed shell or user state.
+
+Dropdown and MultiSelect assign their own value properties before emitting a
+change. Restore the panel binding with `Qt.binding` after handling the change;
+otherwise subsequent scope switches keep the previous screen's values.
+Cancelling a speed preview also resets the shared slider's dragging and live
+value because its MouseArea does not handle cancelled grabs itself.

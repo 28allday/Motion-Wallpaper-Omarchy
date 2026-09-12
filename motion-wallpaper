@@ -75,7 +75,17 @@ require_cmd() {
 # All IPC goes through omarchy-shell rather than a raw `qs -p <path>`: it
 # resolves OMARCHY_PATH itself, recovers WAYLAND_DISPLAY for callers outside the
 # session (ssh, a TTY), and turns IPC-level failures into a nonzero exit.
-ipc() { omarchy-shell "$IPC_TARGET" "$@" 2>>"$LOG_FILE"; }
+ipc() {
+  local reply failure
+  reply="$(omarchy-shell "$IPC_TARGET" "$@" 2>>"$LOG_FILE")" || return $?
+  # Mutators return status JSON. Surface a rejected change rather than
+  # discarding its error along with the normal response.
+  if [ "${1:-}" != status ] && [ "${1:-}" != screens ] && [[ "$reply" == \{* ]]; then
+    failure="$(jq -r '.persistenceError // empty' <<<"$reply")" || return 1
+    if [ -n "$failure" ]; then err "$failure"; return 1; fi
+  fi
+  printf '%s\n' "$reply"
+}
 
 # One read-only probe distinguishes "no shell" from "plugin not enabled" — the
 # wrapper reports the latter as "Target not found." on stderr.
@@ -98,20 +108,22 @@ state_word() {
   j="$(cat)"
   enabled="$(jq -r '.enabled // false' <<<"$j")"
   paused="$(jq -r '.manualPaused // false' <<<"$j")"
-  if [ "$enabled" != "true" ]; then echo stopped; return; fi
-  if [ "$paused" = "true" ]; then echo paused; return; fi
-
   nscreens="$(jq -r '(.screens // []) | length' <<<"$j")"
   if [ "${nscreens:-0}" -gt 0 ]; then
     assigned="$(jq -r '[(.screens // [])[] | select((.video // "") != "")] | length' <<<"$j")"
     playing="$(jq -r '[(.screens // [])[] | select(.playing == true)] | length' <<<"$j")"
     missing="$(jq -r '[(.screens // [])[] | select((.video // "") != "" and (.fileExists // false) != true)] | length' <<<"$j")"
+    if [ "$(jq '[.screens[] | select(.off == true)] | length' <<<"$j")" -eq "$nscreens" ]; then
+      echo stopped; return
+    fi
     if [ "$assigned" -eq 0 ]; then echo "no video set"; return; fi
     if [ "$playing" -gt 0 ]; then echo playing; return; fi
     if [ "$missing" -eq "$assigned" ]; then echo "file missing"; return; fi
     echo paused; return    # assigned everywhere, but auto-paused by fullscreen
   fi
 
+  if [ "$enabled" != "true" ]; then echo stopped; return; fi
+  if [ "$paused" = "true" ]; then echo paused; return; fi
   exists="$(jq -r '.videoFileExists // false' <<<"$j")"
   video="$(jq -r '.videoPath // ""' <<<"$j")"
   if [ -z "$video" ]; then echo "no video set"; return; fi
@@ -150,6 +162,8 @@ cmd_status() {
   printf 'video:      %s\n' "${video:-(none)}"
   printf 'screen:     %s\n' "$output"
   printf 'auto-pause: %s\n' "$([ "$pause" = "true" ] && echo on || echo off)"
+  local failure; failure="$(jq -r '.persistenceError // empty' <<<"$j")"
+  if [ -n "$failure" ]; then printf 'save error: %s\n' "$failure"; fi
   if [ "${nscreens:-0}" -gt 1 ] || [ "${noverrides:-0}" -gt 0 ]; then
     printf 'screens:\n'
     screens_table <<<"$j" | while IFS=$'\t' read -r name state clip; do
@@ -265,7 +279,7 @@ cmd_rotate() {
     *) err "usage: motion-wallpaper rotate <off|all|selected> [shuffle|order] [minutes] [screen]"; exit 1 ;;
   esac
   case "$order" in
-    ""|shuffle) order=shuffle ;;
+    ""|shuffle) ;;
     order|sequential) order=sequential ;;
     *) err "order must be 'shuffle' or 'order'"; exit 1 ;;
   esac
@@ -342,12 +356,12 @@ Usage: ${0##*/} [command]
   status                Print current state, per monitor (default).
   screens               List each monitor and the clip it is showing.
   play <file> [screen]  Start a video everywhere, or on one monitor.
-  play <screen>         Restart one monitor after `stop <screen>`.
+  play <screen>         Restart one monitor after stop <screen>.
   off <screen>          Blank one monitor; the others keep playing.
   clear <screen|all>    Drop a monitor's own clip; follow the default again.
-  stop [screen]         Stop everywhere, or blank one monitor.
+  stop [screen]         Stop the shared default, or blank one monitor.
   toggle [screen]       Flip on/off (good for a keybind).
-  pause | resume [screen]   Pause/resume, everywhere or on one monitor.
+  pause | resume [screen]   Pause/resume the shared default or one monitor.
   screen <name|all>     Coarse targeting for monitors with no clip of their own.
   autopause <on|off>    Pause video under fullscreen windows.
   speed <0.25-2> [screen]   Playback speed, e.g. 1, 0.5, 0.66.

@@ -30,11 +30,10 @@ BarWidget {
   function toggle() { opened = !opened }
 
   // ---- state readout (service-first) -------------------------------------
-  // `rendering` rather than "the default clip exists": with per-monitor clips
-  // the wallpaper can be running off an override while videoPath is unset, or
-  // every monitor can have been blanked individually.
-  readonly property bool hasVideo: !!service && service.enabled && service.rendering === true
-  readonly property bool isPaused: hasVideo && service.manualPaused === true
+  // Each bar reports its own monitor, including profile and fullscreen pauses.
+  readonly property bool hasVideo: !!service && service.urlForScreen(screenName) !== ""
+  readonly property bool isPaused: hasVideo && (service.pausedFor(screenName)
+      || (service.pauseOnFullscreen && service.fullscreenMonitors[screenName] === true))
   readonly property color warningColor: "#e5c07b"
   readonly property color iconColor: !service ? Color.muted
                                    : hasVideo ? (isPaused ? warningColor : Color.accent)

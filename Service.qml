@@ -134,6 +134,10 @@ Item {
   readonly property real minSpeed: 0.25
   readonly property real maxSpeed: 2.0
   property real playbackSpeed: 1.0
+  // Preview belongs to the drag, not persisted settings. A cancelled drag
+  // must not leak into a later save from another control.
+  property string speedPreviewScope: ""
+  property real speedPreviewValue: 1.0
 
   // Rotation is OFF by default: with rotationMode "off" this plugin behaves
   // exactly as it did before — one clip, chosen by hand, until it is changed.
@@ -257,6 +261,7 @@ Item {
 
   onVideoPathChanged: checkVideoFiles()
   onScreenVideosChanged: checkVideoFiles()
+  onScreenRotationChanged: checkVideoFiles()
   onPlaylistChanged: checkVideoFiles()
   onRotCurrentChanged: checkVideoFiles()
 
@@ -320,9 +325,9 @@ Item {
   // capped, deduplicated, anything else dropped rather than trusted.
   function normalizePlaylist(v) {
     var out = []
-    if (!v || typeof v !== "object" || typeof v.length !== "number") return out
+    if (!Array.isArray(v)) return out
     var seen = ({})
-    for (var i = 0; i < v.length && out.length < root.maxPlaylist; i++) {
+    for (var i = 0; i < Math.min(v.length, root.maxPlaylist); i++) {
       var p = root.safePath(v[i])
       if (p === "" || Object.prototype.hasOwnProperty.call(seen, p)) continue
       seen[p] = true
@@ -336,13 +341,20 @@ Item {
   // is dropped rather than allowed to reach the render rule.
   function safeBool(v) { return v === true || String(v) === "true" }
 
+  function safeScreenName(v) {
+    var n = root.safeName(v, "")
+    // These are map keys, not scopes or JavaScript object properties.
+    if (n === "all" || n === "__proto__" || n === "constructor" || n === "prototype") return ""
+    return n
+  }
+
   function normalizeScreenRotation(v) {
     var out = ({})
-    if (!v || typeof v !== "object") return out
+    if (!v || typeof v !== "object" || Array.isArray(v)) return out
     var n = 0
     for (var k in v) {
       if (n >= root.maxScreenVideos) break
-      var name = root.safeName(k, "")
+      var name = root.safeScreenName(k)
       if (name === "") continue
       var o = v[k]
       if (!o || typeof o !== "object") continue
@@ -354,8 +366,7 @@ Item {
       if (o.speed !== undefined) e.speed = root.safeSpeed(o.speed)
       if (o.off !== undefined) e.off = root.safeBool(o.off)
       if (o.paused !== undefined) e.paused = root.safeBool(o.paused)
-      out[name] = e
-      n++
+      if (Object.keys(e).length > 0) { out[name] = e; n++ }
     }
     return out
   }
@@ -410,7 +421,11 @@ Item {
           var slash = pth.lastIndexOf("/")
           list.push({ path: pth, name: slash >= 0 ? pth.substring(slash + 1) : pth })
         }
+        // A successful scan is fresh evidence, including a file that was
+        // previously missing. Recheck configured/selected paths as well.
+        root.statedPaths = ({})
         root.availableVideos = list
+        root.checkVideoFiles()
         root.seedRotation()
       }
     }
@@ -421,7 +436,7 @@ Item {
   // the library except the panel, and the panel rescans when it opens.
   Timer {
     interval: 300000
-    running: root.anyRotationActive
+    running: root.anyRotationRequested
     repeat: true
     onTriggered: root.rescanLibrary()
   }
@@ -469,11 +484,15 @@ Item {
         for (var j = 0; j < list.length; j++)
           if (root.pathExists(list[j])) pool.push(String(list[j]))
       } else if (mode !== "off") {
-        for (var k = 0; k < av.length; k++) pool.push(String(av[k].path))
+        for (var k = 0; k < av.length; k++)
+          if (root.pathExists(av[k].path)) pool.push(String(av[k].path))
       }
 
       // Playback, resolved the same way: an entry overrides, absence inherits.
       var speed = root.safeSpeed(o && o.speed !== undefined ? o.speed : gSpeed)
+      if (root.speedPreviewScope === n
+          || (root.speedPreviewScope === "all" && !(o && o.speed !== undefined)))
+        speed = root.speedPreviewValue
       var off = (o && o.off !== undefined) ? o.off === true : gOff
       var paused = (o && o.paused !== undefined) ? o.paused === true : gPaused
 
@@ -519,14 +538,21 @@ Item {
     return false
   }
 
+  // Keep discovery alive when rotation is requested but its pool is empty.
+  // Disconnected profiles do not create background work.
+  readonly property bool anyRotationRequested: {
+    var p = root.screenPlans || ({})
+    for (var k in p) if (p[k].mode !== "off" && !p[k].off) return true
+    return false
+  }
+
   function _pickIndex(name, pool, prevIdx) {
     if (pool.length <= 1) return 0
     if (root.rotOrderFor(name) === "sequential")
       return (prevIdx + 1) % pool.length
-    var n = prevIdx
-    for (var guard = 0; guard < 12 && n === prevIdx; guard++)
-      n = Math.floor(Math.random() * pool.length)
-    return n
+    // Choose uniformly from every index except the current one.
+    var n = Math.floor(Math.random() * (pool.length - 1))
+    return n >= prevIdx ? n + 1 : n
   }
 
   // Idempotent: only touches a screen that has no clip yet, or whose clip has
@@ -538,10 +564,10 @@ Item {
   function seedRotation() {
     var plans = root.screenPlans || ({})
     var cur = ({}), cus = ({})
-    for (var a in root.rotCurrent) cur[a] = root.rotCurrent[a]
-    for (var b in root.rotCursor) cus[b] = root.rotCursor[b]
+    for (var a in root.rotCurrent) if (plans[a]) cur[a] = root.rotCurrent[a]
+    for (var b in root.rotCursor) if (plans[b]) cus[b] = root.rotCursor[b]
 
-    var changed = false
+    var changed = Object.keys(cur).length !== Object.keys(root.rotCurrent).length
     var i = 0
     for (var n in plans) {
       var pl = plans[n]
@@ -554,6 +580,9 @@ Item {
         cus[n] = idx
         cur[n] = pl.pool[idx]
         changed = true
+      } else {
+        var currentIndex = pl.pool.indexOf(cur[n])
+        if (cus[n] !== currentIndex) { cus[n] = currentIndex; changed = true }
       }
       i++
     }
@@ -567,9 +596,8 @@ Item {
     var pl = root.planFor(n)
     if (!pl || !pl.active) return
     var pool = pl.pool
-    var prevCur = root.rotCursor || ({})
-    var prev = Object.prototype.hasOwnProperty.call(prevCur, n) ? Number(prevCur[n]) : -1
-    if (!isFinite(prev) || prev < 0 || prev >= pool.length) prev = 0
+    var prev = pool.indexOf((root.rotCurrent || ({}))[n])
+    if (prev < 0) prev = pool.length - 1
     var nxt = root._pickIndex(n, pool, prev)
 
     var cur = ({}), cus = ({})
@@ -617,9 +645,13 @@ Item {
     // per-monitor clip. screenVideos is never rewritten, so switching rotation
     // off restores those assignments untouched.
     if (root.rotationActiveFor(n) && (root.output === "all" || root.output === n)) {
+      var plan = root.planFor(n)
       var rc = root.rotCurrent || ({})
-      if (Object.prototype.hasOwnProperty.call(rc, n) && String(rc[n] || "") !== "")
+      if (Object.prototype.hasOwnProperty.call(rc, n) && plan.pool.indexOf(rc[n]) >= 0)
         return String(rc[n])
+      // Binding evaluation may precede seedRotation after a stat result.
+      // Resolve a usable replacement immediately, keeping the surface alive.
+      return plan.pool[0]
     }
 
     // Rotation off (or nothing seeded yet): the original behaviour, unchanged.
@@ -648,7 +680,6 @@ Item {
   // change leaves the surface alone and is handled by its cross-fade.
   property var activeScreens: {
     var out = []
-    if (!enabled) return out
     var screens = Quickshell.screens
     for (var i = 0; i < screens.length; i++) {
       var s = screens[i]
@@ -663,8 +694,10 @@ Item {
   readonly property bool rendering: activeScreens.length > 0
 
   // ------------------------------------------------------- persistence
-  function persistState() {
-    var payload = JSON.stringify({
+  property string persistenceError: ""
+
+  function stateObject() {
+    return {
       videoPath: root.videoPath,
       enabled: root.enabled,
       output: root.output,
@@ -676,8 +709,37 @@ Item {
       rotationInterval: root.rotationInterval,
       playlist: root.playlist || [],
       screenRotation: root.screenRotation || ({})
-    }, null, 2) + "\n"
+    }
+  }
+
+  function statePayload(state) {
+    var payload = JSON.stringify(state) + "\n"
+    // JSON strings may contain multibyte characters. The reader caps bytes,
+    // not UTF-16 code units; encodeURIComponent measures the same UTF-8 bytes.
+    var bytes = encodeURIComponent(payload).replace(/%[0-9A-F]{2}/g, "x").length
+    if (bytes > root.maxStateBytes) {
+      root.persistenceError = "Settings are too large to save. Shorten the playlists or remove unused screen profiles."
+      console.warn("motion-wallpaper:", root.persistenceError)
+      return ""
+    }
+    return payload
+  }
+
+  // Validate the entire candidate before assigning any reactive property.
+  // A rejected command leaves both current settings and the saved file intact.
+  function commitState(patch) {
+    var state = root.stateObject()
+    for (var k in patch) state[k] = patch[k]
+    var payload = root.statePayload(state)
+    if (payload === "") return false
+    for (var key in patch) root[key] = patch[key]
     root.writeState(payload)
+    return true
+  }
+
+  function persistState() {
+    var payload = root.statePayload(root.stateObject())
+    if (payload !== "") root.writeState(payload)
   }
 
   // Accept only a flat { connector: path } object of strings — anything else in
@@ -688,8 +750,8 @@ Item {
     if (!v || typeof v !== "object" || Array.isArray(v)) return out
     var n = 0
     for (var k in v) {
-      var name = String(k).trim()
-      if (name === "" || name.length > root.maxNameLength) continue
+      var name = root.safeScreenName(k)
+      if (name === "") continue
       if (n >= root.maxScreenVideos) {
         console.warn("motion-wallpaper: screenVideos truncated at", root.maxScreenVideos, "entries")
         break
@@ -706,7 +768,7 @@ Item {
     // Refuse an oversized file rather than handing it to JSON.parse, which
     // would build the whole tree in the shell's heap before any of the
     // per-field limits below could apply.
-    if (t.length > root.maxStateBytes) {
+    if (encodeURIComponent(t).replace(/%[0-9A-F]{2}/g, "x").length > root.maxStateBytes) {
       console.warn("motion-wallpaper: state.json is", t.length,
                    "bytes, over the", root.maxStateBytes, "limit - ignoring it")
       return false
@@ -835,23 +897,46 @@ Item {
     root.syncSeedFromConfig()
   }
 
-  // Atomic write: a temp file in the same directory, then rename over the
-  // target. The payload is built from already-clamped values and goes in as a
-  // positional parameter, never interpolated into the script.
+  // Atomic write through stdin: even a valid state can exceed Linux's
+  // single-argument limit. Keep paths and limits in argv, never the payload.
+  readonly property string stateWriteScript:
+    'd=$(dirname -- "$1"); mkdir -p -- "$d" || exit 1; ' +
+    't=$(mktemp -- "$1.XXXXXX") || exit 1; ' +
+    'trap \'rm -f -- "$t"\' EXIT; ' +
+    'head -c "$(( $2 + 1 ))" > "$t" || exit 1; ' +
+    '[ "$(wc -c < "$t")" -le "$2" ] || exit 1; ' +
+    'mv -fT -- "$t" "$1"'
+
   Process {
     id: stateWriteProc
-    onExited: if (root._pendingState !== "") { var q = root._pendingState; root._pendingState = ""; root.writeState(q) }
+    property string payload: ""
+    onStarted: {
+      write(payload)
+      stdinEnabled = false
+      payload = ""
+    }
+    onExited: function(code) {
+      if (code !== 0) {
+        root.persistenceError = "Could not save wallpaper settings. Check disk space and file permissions."
+        console.warn("motion-wallpaper: state write failed:", code)
+      }
+      if (root._pendingState !== "") {
+        var q = root._pendingState
+        root._pendingState = ""
+        root.writeState(q)
+      }
+    }
   }
 
   property string _pendingState: ""
 
   function writeState(payload) {
     if (stateWriteProc.running) { root._pendingState = payload; return }
-    stateWriteProc.command = root.timeoutPrefix.concat(["bash", "-c",
-      'd=$(dirname -- "$1"); mkdir -p -- "$d" || exit 1; ' +
-      't=$(mktemp -- "$1.XXXXXX") || exit 1; ' +
-      'printf %s "$2" > "$t" && mv -f -- "$t" "$1" || { rm -f -- "$t"; exit 1; }',
-      "_", root.statePath, payload])
+    root.persistenceError = ""
+    stateWriteProc.payload = payload
+    stateWriteProc.command = root.timeoutPrefix.concat(["bash", "-c", root.stateWriteScript,
+      "_", root.statePath, String(root.maxStateBytes)])
+    stateWriteProc.stdinEnabled = true
     stateWriteProc.running = true
   }
 
@@ -1160,7 +1245,8 @@ Item {
       rotationInterval: root.rotationInterval,
       rotationActive: root.anyRotationActive,
       playlist: root.playlist || [],
-      libraryCount: (root.availableVideos || []).length
+      libraryCount: (root.availableVideos || []).length,
+      persistenceError: root.persistenceError
     }
   }
 
@@ -1205,25 +1291,20 @@ Item {
   // Enable + (optionally) set a new video, then persist.
   function applyPlay(path) {
     var p = root.safePath(String(path || "").trim())
-    if (p) root.videoPath = p
-    root.enabled = true
-    root.manualPaused = false
-    root.persistState()
+    if (root.commitState({ videoPath: p || root.videoPath, enabled: true }))
+      root.manualPaused = false
     return root.statusObject()
   }
 
-  // Disable rendering entirely (surfaces destroyed, static wallpaper shows).
+  // Stop screens inheriting playback; explicitly enabled profiles keep playing.
   function applyStop() {
-    root.enabled = false
-    root.manualPaused = false
-    root.persistState()
+    if (root.commitState({ enabled: false })) root.manualPaused = false
   }
 
   // Flip enabled on/off. Returns the new enabled state.
   function applyToggle() {
-    root.enabled = !root.enabled
+    root.commitState({ enabled: !root.enabled })
     if (root.enabled) root.manualPaused = false
-    root.persistState()
     return root.enabled
   }
 
@@ -1233,36 +1314,60 @@ Item {
   // ---- per-screen playback -------------------------------------------------
   // Write one field of a screen's own playback. Passing undefined clears it, so
   // the screen goes back to following the global Play/Stop/Pause and speed.
-  function _setScreenPlayback(screen, field, value) {
-    var sc = root.safeName(screen, "")
-    if (sc === "") return root.statusObject()
+  function profileWithFields(screen, fields) {
+    var sc = root.safeScreenName(screen)
+    if (sc === "") {
+      root.persistenceError = "Invalid screen name."
+      return null
+    }
     var m = root._cloneScreenRotation()
-    var e = m[sc] || ({})
-    if (value === undefined) delete e[field]
-    else e[field] = value
+    var e = Object.prototype.hasOwnProperty.call(m, sc) ? m[sc] : ({})
+    for (var field in fields) {
+      if (fields[field] === undefined) delete e[field]
+      else e[field] = fields[field]
+    }
     // An entry holding nothing is the same as no entry; drop it so
     // hasOwnProfile() stays honest.
     var empty = true
     for (var k in e) { empty = false; break }
-    if (empty) delete m[sc]; else m[sc] = e
-    root.screenRotation = m
-    root.persistState()
+    if (empty) delete m[sc]
+    else {
+      if (!Object.prototype.hasOwnProperty.call(m, sc)
+          && Object.keys(m).length >= root.maxScreenVideos) {
+        root.persistenceError = "Screen profile limit reached. Remove an unused profile first."
+        return null
+      }
+      m[sc] = e
+    }
+    return m
+  }
+
+  function _setScreenPlayback(screen, field, value) {
+    var fields = ({})
+    fields[field] = value
+    var m = root.profileWithFields(screen, fields)
+    if (m !== null) root.commitState({ screenRotation: m })
     return root.statusObject()
   }
 
   function applyStopScreen(screen) { return root._setScreenPlayback(screen, "off", true) }
   function applyPlayScreen(screen) {
-    var sc = root.safeName(screen, "")
-    if (sc === "") return root.statusObject()
-    // Playing one screen must not leave it hostage to a global Stop.
-    if (!root.enabled) { root.enabled = true; root.manualPaused = false }
-    var m = root._cloneScreenRotation()
-    var e = m[sc] || ({})
-    e.off = false
-    e.paused = false
-    m[sc] = e
-    root.screenRotation = m
-    root.persistState()
+    var sc = root.safeScreenName(screen)
+    var m = root.profileWithFields(sc, { off: false, paused: false })
+    if (m === null) return root.statusObject()
+    var sv = root.normalizeScreenVideos(root.screenVideos)
+    // The library's Off row is another way to blank a monitor. Play must
+    // release that opt-out too, without enabling any other screen.
+    if (sv[sc] === "") delete sv[sc]
+    if (root.output !== "all" && root.output !== sc
+        && !Object.prototype.hasOwnProperty.call(sv, sc) && root.videoPath !== "") {
+      if (Object.keys(sv).length >= root.maxScreenVideos) {
+        root.persistenceError = "Screen clip limit reached. Remove an unused screen clip first."
+        return root.statusObject()
+      }
+      sv[sc] = root.videoPath
+    }
+    root.commitState({ screenRotation: m, screenVideos: sv })
     return root.statusObject()
   }
   function applyToggleScreen(screen) {
@@ -1275,17 +1380,8 @@ Item {
 
   // Drop a screen's own playback fields; rotation settings are left alone.
   function applyClearScreenPlayback(screen) {
-    var sc = root.safeName(screen, "")
-    if (sc === "") return root.statusObject()
-    var m = root._cloneScreenRotation()
-    var e = m[sc]
-    if (!e) return root.statusObject()
-    delete e.speed; delete e.off; delete e.paused
-    var empty = true
-    for (var k in e) { empty = false; break }
-    if (empty) delete m[sc]; else m[sc] = e
-    root.screenRotation = m
-    root.persistState()
+    var m = root.profileWithFields(screen, { speed: undefined, off: undefined, paused: undefined })
+    if (m !== null) root.commitState({ screenRotation: m })
     return root.statusObject()
   }
 
@@ -1295,12 +1391,14 @@ Item {
   // applyPlay() above leaves overrides and `output` alone.
   function applyPlayAll(path) {
     var p = root.safePath(String(path || "").trim())
-    if (p) root.videoPath = p
-    root.screenVideos = ({})
-    root.output = "all"
-    root.enabled = true
-    root.manualPaused = false
-    root.persistState()
+    var profiles = root._cloneScreenRotation()
+    for (var n in profiles) {
+      delete profiles[n].off; delete profiles[n].paused
+      if (Object.keys(profiles[n]).length === 0) delete profiles[n]
+    }
+    if (root.commitState({ videoPath: p || root.videoPath, screenVideos: ({}),
+                           screenRotation: profiles, output: "all", enabled: true }))
+      root.manualPaused = false
     return root.statusObject()
   }
 
@@ -1310,39 +1408,40 @@ Item {
   function applySetScreenVideo(name, path) {
     var n = String(name || "").trim()
     if (n === "" || n === "all") return root.applyPlayAll(path)
-    if (n.length > root.maxNameLength) return root.statusObject()
+    if (root.safeScreenName(n) === "") {
+      root.persistenceError = "Invalid screen name."
+      return root.statusObject()
+    }
     var p = root.safePath(String(path || "").trim())
     var m = ({})
     var sv = root.screenVideos || ({})
     for (var k in sv) m[k] = sv[k]
     // Adding a NEW key is what can grow the map without limit; overwriting an
     // existing one cannot, so it stays allowed at the cap.
-    if (!m.hasOwnProperty(n) && Object.keys(m).length >= root.maxScreenVideos) {
-      console.warn("motion-wallpaper: refusing a new screen entry at the", root.maxScreenVideos, "cap")
+    if (!Object.prototype.hasOwnProperty.call(m, n) && Object.keys(m).length >= root.maxScreenVideos) {
+      root.persistenceError = "Screen clip limit reached. Remove an unused screen clip first."
       return root.statusObject()
     }
     m[n] = p
-    root.screenVideos = m
+    var patch = { screenVideos: m }
     if (p !== "") {                 // assigning a clip implies "play it"
-      root.enabled = true
-      root.manualPaused = false
+      var profiles = root.profileWithFields(n, { off: false, paused: false })
+      if (profiles === null) return root.statusObject()
+      patch.screenRotation = profiles
     }
-    root.persistState()
+    root.commitState(patch)
     return root.statusObject()
   }
 
   // Drop a monitor's override so it follows the default clip again.
   function applyClearScreenVideo(name) {
     var n = String(name || "").trim()
-    if (n === "" || n === "all") {
-      root.screenVideos = ({})
-    } else {
-      var m = ({})
+    var m = ({})
+    if (n !== "" && n !== "all") {
       var sv = root.screenVideos || ({})
       for (var k in sv) if (k !== n) m[k] = sv[k]
-      root.screenVideos = m
     }
-    root.persistState()
+    root.commitState({ screenVideos: m })
     return root.statusObject()
   }
 
@@ -1350,21 +1449,29 @@ Item {
   // Persists and re-evaluates activeScreens, so the video surfaces
   // move/appear/disappear with NO shell restart.
   function applySetOutput(name) {
-    root.output = root.safeName(name, "all")
-    root.persistState()
+    root.commitState({ output: root.safeName(name, "all") })
     return root.statusObject()
   }
 
   function applySetPauseOnFullscreen(on) {
-    root.pauseOnFullscreen = (on === true || String(on) === "true")
-    root.persistState()
+    root.commitState({ pauseOnFullscreen: (on === true || String(on) === "true") })
     return root.statusObject()
   }
 
   function applySetSpeed(v) {
-    root.playbackSpeed = root.safeSpeed(v)
-    root.persistState()
+    root.commitState({ playbackSpeed: root.safeSpeed(v) })
     return root.statusObject()
+  }
+
+  function previewSpeed(v, scope) {
+    var sc = String(scope || "all")
+    if (sc !== "all" && root.safeScreenName(sc) === "") return
+    root.speedPreviewValue = root.safeSpeed(v)
+    root.speedPreviewScope = sc
+  }
+
+  function clearSpeedPreview(scope) {
+    if (root.speedPreviewScope === String(scope || "all")) root.speedPreviewScope = ""
   }
 
   // A new object, so bindings reading the map actually re-evaluate.
@@ -1383,49 +1490,42 @@ Item {
   // just that monitor's profile, creating one if it had none.
   function applySetRotation(mode, order, minutes, screen) {
     var sc = String(screen === undefined ? "" : screen)
+    var fields = ({})
+    if (mode !== undefined && String(mode) !== "") fields.mode = root.safeMode(mode)
+    if (order !== undefined && String(order) !== "") fields.order = root.safeOrder(order)
+    if (minutes !== undefined && String(minutes) !== "") fields.interval = root.safeInterval(minutes)
     if (sc === "" || sc === "all") {
-      if (mode !== undefined && String(mode) !== "") root.rotationMode = root.safeMode(mode)
-      if (order !== undefined && String(order) !== "") root.rotationOrder = root.safeOrder(order)
-      if (minutes !== undefined && String(minutes) !== "") root.rotationInterval = root.safeInterval(minutes)
+      var patch = ({})
+      if (fields.mode !== undefined) patch.rotationMode = fields.mode
+      if (fields.order !== undefined) patch.rotationOrder = fields.order
+      if (fields.interval !== undefined) patch.rotationInterval = fields.interval
+      root.commitState(patch)
     } else {
-      var m = root._cloneScreenRotation()
-      var e = m[sc] || ({})
-      if (mode !== undefined && String(mode) !== "") e.mode = root.safeMode(mode)
-      if (order !== undefined && String(order) !== "") e.order = root.safeOrder(order)
-      if (minutes !== undefined && String(minutes) !== "") e.interval = root.safeInterval(minutes)
-      m[sc] = e
-      root.screenRotation = m
+      var m = root.profileWithFields(sc, fields)
+      if (m !== null) root.commitState({ screenRotation: m })
     }
     root.seedRotation()
-    root.persistState()
     return root.statusObject()
   }
 
   function applySetPlaylist(paths, screen) {
     var sc = String(screen === undefined ? "" : screen)
     if (sc === "" || sc === "all") {
-      root.playlist = root.normalizePlaylist(paths)
+      root.commitState({ playlist: root.normalizePlaylist(paths) })
     } else {
-      var m = root._cloneScreenRotation()
-      var e = m[sc] || ({})
-      e.playlist = root.normalizePlaylist(paths)
-      m[sc] = e
-      root.screenRotation = m
+      var m = root.profileWithFields(sc, { playlist: root.normalizePlaylist(paths) })
+      if (m !== null) root.commitState({ screenRotation: m })
     }
     root.seedRotation()
-    root.persistState()
     return root.statusObject()
   }
 
   // Drop a screen's override so it follows the global settings again.
   function applyClearScreenRotation(screen) {
-    var sc = root.safeName(screen, "")
-    if (sc === "") return root.statusObject()
-    var m = root._cloneScreenRotation()
-    delete m[sc]
-    root.screenRotation = m
+    var m = root.profileWithFields(screen, { mode: undefined, order: undefined,
+                                           interval: undefined, playlist: undefined })
+    if (m !== null) root.commitState({ screenRotation: m })
     root.seedRotation()
-    root.persistState()
     return root.statusObject()
   }
 
