@@ -18,7 +18,8 @@ Item {
 
   readonly property var service: widget ? widget.service : null
   // Tell the PanelKeyCatcher to release keys while the screen dropdown is open.
-  readonly property bool keysBlocked: screenDropdown.popupOpen
+  readonly property bool keysBlocked: screenDropdown.popupOpen || rotModeDropdown.popupOpen
+                                     || rotIntervalDropdown.popupOpen || playlistSelect.popupOpen
 
   readonly property color fg: bar ? bar.foreground : Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
@@ -41,7 +42,10 @@ Item {
     return false
   }
 
-  onScopeChanged: if (!scopeValid()) scope = "all"
+  onScopeChanged: {
+    cancelSpeedPreview()
+    if (!scopeValid()) scope = "all"
+  }
 
   // What the scope should be each time the panel opens. Once the screens have
   // been set individually, "All screens" is a destructive default — one click
@@ -159,13 +163,21 @@ Item {
   function rescan() { if (panel.service) panel.service.rescanLibrary() }
 
   Component.onCompleted: { rescan(); resetScope() }
+  Component.onDestruction: cancelSpeedPreview()
 
   Connections {
     target: panel.widget || null
     function onOpenedChanged() {
-      if (!panel.widget || !panel.widget.opened) return
+      if (!panel.widget || !panel.widget.opened) { panel.cancelSpeedPreview(); return }
       panel.rescan()
       panel.resetScope()
+    }
+  }
+
+  Connections {
+    target: Quickshell
+    function onScreensChanged() {
+      if (!panel.scopeValid() || !panel.multiScreen) panel.scope = "all"
     }
   }
 
@@ -180,6 +192,14 @@ Item {
 
   // < 0 unless a drag is in flight, so the readout follows the knob.
   property real pendingSpeed: -1
+  property string pendingSpeedScope: ""
+
+  function cancelSpeedPreview() {
+    if (panel.service && panel.pendingSpeedScope !== "")
+      panel.service.clearSpeedPreview(panel.pendingSpeedScope)
+    panel.pendingSpeed = -1
+    panel.pendingSpeedScope = ""
+  }
 
   readonly property real serviceSpeed: {
     if (!panel.service) return 1
@@ -282,6 +302,17 @@ Item {
       }
     }
 
+    Text {
+      textFormat: Text.PlainText
+      visible: text !== ""
+      width: parent.width
+      text: panel.service ? panel.service.persistenceError : ""
+      color: panel.widget ? panel.widget.warningColor : panel.fg
+      font.family: panel.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      wrapMode: Text.WordWrap
+    }
+
     // ---------- transport buttons ----------
     Row {
       width: parent.width
@@ -372,18 +403,19 @@ Item {
         tickCount: panel.speedMarks.length
         value: panel.speedValue
         onMoved: function(v) {
+          panel.pendingSpeedScope = panel.scope
           panel.pendingSpeed = panel.roundSpeed(v)
-          // Live preview without writing state.json on every pixel; the
-          // release below is what persists. Only the global slider can preview
-          // this way - a scoped one has to go through the profile.
-          if (panel.service && panel.scope === "all")
-            panel.service.playbackSpeed = panel.pendingSpeed
+          if (panel.service) panel.service.previewSpeed(panel.pendingSpeed, panel.pendingSpeedScope)
         }
         onReleased: function(v) {
+          if (panel.pendingSpeedScope === "") return
           var final = panel.roundSpeed(v)
-          panel.pendingSpeed = -1
-          if (panel.widget) panel.widget.setSpeedScoped(final, panel.scope)
+          if (panel.widget) panel.widget.setSpeedScoped(final, panel.pendingSpeedScope)
+          panel.cancelSpeedPreview()
         }
+        onDraggingChanged: if (!dragging) Qt.callLater(function() {
+          if (!speedSlider.dragging) panel.cancelSpeedPreview()
+        })
       }
 
       Text {
@@ -446,7 +478,7 @@ Item {
       ]
       value: panel.rotationMode
       onChanged: function(v) {
-        if (panel.widget) panel.widget.setRotation(String(v), panel.rotationOrder, panel.rotationInterval, panel.scope)
+        if (panel.widget) panel.widget.setRotation(String(v), "", "", panel.scope)
       }
     }
 
@@ -462,7 +494,7 @@ Item {
       ]
       value: panel.rotationOrder
       onChanged: function(v) {
-        if (panel.widget) panel.widget.setRotation(panel.rotationMode, String(v), panel.rotationInterval, panel.scope)
+        if (panel.widget) panel.widget.setRotation("", String(v), "", panel.scope)
       }
     }
 
@@ -483,7 +515,7 @@ Item {
         options: panel.intervalOptions
         value: String(panel.rotationInterval)
         onChanged: function(v) {
-          if (panel.widget) panel.widget.setRotation(panel.rotationMode, panel.rotationOrder, Number(v), panel.scope)
+          if (panel.widget) panel.widget.setRotation("", "", Number(v), panel.scope)
         }
       }
 
@@ -569,7 +601,7 @@ Item {
       header: Rectangle {
         id: offRow
         visible: panel.scope !== "all"
-        readonly property bool current: panel.videoPath === ""
+        readonly property bool current: panel.scopedOff || panel.videoPath === ""
         width: videoList.width
         height: visible ? Style.spacing.controlHeight + videoList.spacing : 0
         color: "transparent"
@@ -642,7 +674,7 @@ Item {
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
           anchors.rightMargin: Style.spacing.controlPaddingX
-          visible: vrow.current
+          visible: vrow.current && !panel.scopedOff
           text: panel.isPaused ? "󰏤" : "󰐊"
           color: Style.selectedStateColor(panel.fg, Color.accent)
           font.family: panel.fontFamily

@@ -106,7 +106,7 @@ motion-wallpaper play ~/Videos/clip.mp4          # every monitor
 motion-wallpaper play ~/Videos/rain.mp4 DP-1     # just that monitor
 motion-wallpaper off DP-2        # blank one screen; the others keep playing
 motion-wallpaper clear DP-1      # drop its own clip; follow the default again
-motion-wallpaper stop            # stop everywhere; static wallpaper shows through
+motion-wallpaper stop            # stop screens following the shared playback default
 motion-wallpaper toggle          # flip on/off
 motion-wallpaper pause           # pause / resume
 motion-wallpaper resume
@@ -156,7 +156,7 @@ Connector names come from `hyprctl monitors`. A monitor keeps its clip while it 
 
 ### Playback speed
 
-A **SPEED** slider in the panel sets how fast the clip plays, anywhere from `0.25x` to `2x`. It is free rather than stepped — `0.66` and `0.99` are as reachable as `1` — with tick marks at the round speeds as anchors. Dragging previews live; letting go saves. The speed applies to every monitor.
+A **SPEED** slider in the panel sets how fast the clip plays, anywhere from `0.25x` to `2x`. It is free rather than stepped — `0.66` and `0.99` are as reachable as `1`. Dragging previews live on the selected screen or shared default; letting go saves. Closing the panel or changing screen cancels the preview. Screens with their own speed keep it when the shared default changes.
 
 ```bash
 motion-wallpaper speed 0.5
@@ -183,7 +183,9 @@ motion-wallpaper play DP-2          # start it again
 motion-wallpaper follow DP-1        # back to the shared default
 ```
 
-The global **Stop** still governs every screen that has no profile of its own, so the plugin behaves exactly as before for anyone not using this.
+The global **Stop** governs screens without their own playback on/off setting. A screen with only its own speed or rotation still follows global Stop. An explicitly started screen keeps playing independently. Starting a named screen after global Stop starts only that screen.
+
+Choosing a clip on a named screen also releases that screen's Stop/Pause. Choosing a clip under *All screens* clears per-screen clip and Stop/Pause overrides; speed and rotation settings are kept. Rotation still takes precedence until switched off.
 
 ### Rotation
 
@@ -198,7 +200,7 @@ In the panel's **ROTATION** section:
 | Change every | 1, 2, 5, 10, 15, 30 minutes, or 1 hour |
 | Videos in rotation | which clips to cycle, in *chosen* mode |
 
-**Each monitor can rotate differently.** The rotation controls follow the **SCREEN** dropdown, the same as the video list: on *All screens* you are editing the shared default, and on a named screen you are editing that screen alone. A screen with no settings of its own follows the shared default; changing anything while it is selected gives it its own, and a **Follow default** button hands it back.
+**Each monitor can rotate differently.** The rotation controls follow the **SCREEN** dropdown: on *All screens* you are editing the shared default, and on a named screen you are editing that screen alone. Changing a control overrides only that field; untouched fields keep following the default. Use `motion-wallpaper follow <screen> rotation` to reset rotation while retaining that screen's speed, Stop and Pause settings. Reset is available through the CLI.
 
 So one monitor can shuffle every five minutes while the other sits on a single clip:
 
@@ -220,9 +222,17 @@ Each monitor keeps its own position in the list, so two screens sharing a playli
 
 Rotation pauses with the video, so a fullscreen window does not churn wallpapers behind it.
 
+The library is rescanned every five minutes while rotation is requested, including when it is empty. Opening the panel also scans immediately. Missing clips are skipped while another playable clip remains. When editing an ordered playlist, Next advances from the current clip's new position.
+
 ### Persistence
 
 A playing wallpaper **resumes automatically after a reboot** — the plugin persists its state to `~/.local/state/motion-wallpaper/state.json` and the shell loads it on login. There's no separate autostart step: `stop` means it stays off next boot, `play` means it comes back.
+
+Settings are limited to 256 KiB of UTF-8 JSON, 64 screen profiles and the first 500 playlist entries. A change exceeding the total limit is rejected before changing current or saved settings. Save errors appear in the panel and `motion-wallpaper status`.
+
+### Regression checks
+
+For contributors: `node --test tests/*.test.cjs` runs the service, CLI and persistence regressions. Node is a test dependency only. Persistence integration tests also require `qs` and run a tiny offscreen Process fixture with temporary files; they do not load or restart the installed wallpaper plugin.
 
 ## How It Works
 
