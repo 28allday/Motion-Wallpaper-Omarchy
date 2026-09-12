@@ -1321,7 +1321,7 @@ Item {
       return null
     }
     var m = root._cloneScreenRotation()
-    var e = m[sc] || ({})
+    var e = Object.prototype.hasOwnProperty.call(m, sc) ? m[sc] : ({})
     for (var field in fields) {
       if (fields[field] === undefined) delete e[field]
       else e[field] = fields[field]

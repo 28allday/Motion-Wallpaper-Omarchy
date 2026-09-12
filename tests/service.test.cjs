@@ -142,3 +142,14 @@ test('global preview respects explicit per-screen speed, release commits the sel
   c.clearSpeedPreview('all');c.previewSpeed(.66,'DP-1');c.applySetSpeedOn('DP-1',.66);c.clearSpeedPreview('DP-1');
   assert.equal(c.speedFor('DP-1'),.66);assert.equal(JSON.parse(c.lastPersisted).screenRotation['DP-1'].speed,.66);
 });
+
+test('inherited object names become real profiles and cannot bypass the state byte cap', () => {
+  for (const name of ['toString', 'hasOwnProperty', 'valueOf', '__defineGetter__']) {
+    const c=fresh();c.applySetSpeedOn(name,.5);
+    assert.equal(JSON.parse(c.lastPersisted).screenRotation[name].speed,.5);
+    const before=c.lastPersisted;
+    c.applySetPlaylist(Array.from({length:500},(_,i)=>'/clips/'+i+'x'.repeat(3000)),name);
+    assert.equal(c.lastPersisted,before);assert.match(c.persistenceError,/too large/);
+    assert.equal(c.screenRotation[name].playlist,undefined);
+  }
+});

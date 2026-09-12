@@ -567,7 +567,8 @@ per-screen resolution.
 
 Playlist input must be an actual array; inspect at most 500 entries, including
 duplicates. An object carrying a huge `length` is not an array and must not
-create an unbounded loop. Reserved object keys are not accepted as connectors.
+create an unbounded loop. Prototype-mutating keys are not accepted as connectors. Profile lookups must
+check own properties so other inherited names become plain data entries.
 
 The background scan is gated by requested rotation on a connected, enabled
 screen, not by a nonempty pool. Otherwise an empty library cannot recover.
@@ -576,7 +577,14 @@ for the other fields.
 
 Run `node --test tests/*.test.cjs`. Service tests execute functions and property
 bodies extracted from the current QML, with mock screens and filesystem state.
-They do not simulate Qt's binding scheduler or video decoders. Separate tests
-exercise the production atomic-write script and Process lifecycle in an
+The Node harness does not simulate Qt's binding scheduler or video decoders.
+Separate Qt fixtures exercise reactive plans, preview cancellation, missing
+clips, and the production atomic-write script and Process lifecycle in an
 isolated offscreen fixture, including large stdin, queued saves and recovery
 from failed writes. No tests mutate the installed shell or user state.
+
+Dropdown and MultiSelect assign their own value properties before emitting a
+change. Restore the panel binding with `Qt.binding` after handling the change;
+otherwise subsequent scope switches keep the previous screen's values.
+Cancelling a speed preview also resets the shared slider's dragging and live
+value because its MouseArea does not handle cancelled grabs itself.

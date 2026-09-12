@@ -232,7 +232,7 @@ Settings are limited to 256 KiB of UTF-8 JSON, 64 screen profiles and the first 
 
 ### Regression checks
 
-For contributors: `node --test tests/*.test.cjs` runs the service, CLI and persistence regressions. Node is a test dependency only. Persistence integration tests also require `qs` and run a tiny offscreen Process fixture with temporary files; they do not load or restart the installed wallpaper plugin.
+For contributors: `node --test tests/*.test.cjs` runs the service, CLI and persistence regressions. Node is a test dependency only. Qt integration tests also require `qs` and run isolated offscreen fixtures with temporary files; they do not load or restart the installed wallpaper plugin. The control test uses the installed Omarchy UI components (`OMARCHY_PATH`, default `/usr/share/omarchy`) and skips if they are unavailable.
 
 ## How It Works
 

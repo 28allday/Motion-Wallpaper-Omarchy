@@ -199,6 +199,9 @@ Item {
       panel.service.clearSpeedPreview(panel.pendingSpeedScope)
     panel.pendingSpeed = -1
     panel.pendingSpeedScope = ""
+    // PanelSlider does not reset dragging when its mouse grab is cancelled.
+    speedSlider.dragging = false
+    speedSlider.liveValue = panel.serviceSpeed
   }
 
   readonly property real serviceSpeed: {
@@ -350,7 +353,10 @@ Item {
       label: "SCREEN"
       options: panel.screenOptions
       value: panel.scope
-      onChanged: function(v) { panel.scope = String(v) }
+      onChanged: function(v) {
+        panel.scope = String(v)
+        value = Qt.binding(function() { return panel.scope })
+      }
     }
 
     Text {
@@ -479,6 +485,8 @@ Item {
       value: panel.rotationMode
       onChanged: function(v) {
         if (panel.widget) panel.widget.setRotation(String(v), "", "", panel.scope)
+        // Dropdown assigns value internally; restore the scope binding.
+        value = Qt.binding(function() { return panel.rotationMode })
       }
     }
 
@@ -516,6 +524,7 @@ Item {
         value: String(panel.rotationInterval)
         onChanged: function(v) {
           if (panel.widget) panel.widget.setRotation("", "", Number(v), panel.scope)
+          value = Qt.binding(function() { return String(panel.rotationInterval) })
         }
       }
 
@@ -543,7 +552,10 @@ Item {
       fontFamily: panel.fontFamily
       options: panel.playlistOptions
       values: panel.playlistValues
-      onChanged: function(vals) { if (panel.widget) panel.widget.setPlaylist(vals, panel.scope) }
+      onChanged: function(vals) {
+        if (panel.widget) panel.widget.setPlaylist(vals, panel.scope)
+        values = Qt.binding(function() { return panel.playlistValues })
+      }
     }
 
 
