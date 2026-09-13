@@ -664,7 +664,7 @@ Item {
 
   // ------------------------------------------------------- persistence
   function persistState() {
-    var payload = JSON.stringify({
+    var state = {
       videoPath: root.videoPath,
       enabled: root.enabled,
       output: root.output,
@@ -676,8 +676,21 @@ Item {
       rotationInterval: root.rotationInterval,
       playlist: root.playlist || [],
       screenRotation: root.screenRotation || ({})
-    }, null, 2) + "\n"
-    root.writeState(payload)
+    }
+    // Cache the last probe so the next shell start answers instantly without
+    // respawning ffmpeg. Advisory only: validated again in applyHwCache, and
+    // refreshed in the background when stale.
+    if (root.hwChecked) {
+      state.hwCache = {
+        working: root.hwWorking,
+        vendor: root.hwVendor,
+        reason: root.hwReason,
+        backends: root.hwBackends || ({}),
+        supported: root.hwSupported || [],
+        at: root.hwProbedAt
+      }
+    }
+    root.writeState(JSON.stringify(state, null, 2) + "\n")
   }
 
   // Accept only a flat { connector: path } object of strings — anything else in
@@ -734,6 +747,7 @@ Item {
         if (o.rotationInterval !== undefined) root.rotationInterval = root.safeInterval(o.rotationInterval)
         if (o.playlist !== undefined) root.playlist = root.normalizePlaylist(o.playlist)
         if (o.screenRotation !== undefined) root.screenRotation = root.normalizeScreenRotation(o.screenRotation)
+        if (o.hwCache !== undefined) root.applyHwCache(o.hwCache)
         return true
       }
     } catch (e) {
@@ -944,6 +958,8 @@ Item {
   // only detects and surfaces: which backends ffmpeg lists, which GPU vendor
   // is present, whether that vendor's init actually works (VAAPI for
   // Intel/AMD, CUDA for NVIDIA), and why software fallback is in effect. The
+  // result is cached in state.json (refreshed when older than a day), so
+  // later starts answer instantly. The
   // panel and the CLI read it via hwStatusObject().
   property var hwSupported: []
   property string hwWorking: ""
@@ -952,7 +968,52 @@ Item {
   property bool hwChecked: false
   property string hwVendor: "unknown"   // intel | amd | nvidia | hybrid | unknown
   property var hwBackends: ({})         // { vaapi: ok|fail, cuda: ok|fail|skipped }
+  property double hwProbedAt: 0         // ms epoch of the last successful probe; 0 = never / timed out
+  property bool hwFromCache: false      // values hydrated from state, not probed this session
+  readonly property double hwCacheTtlMs: 86400000  // re-probe at startup past this age
   readonly property bool hwSoftwareFallback: hwChecked && hwWorking === ""
+
+  // The cached probe is advisory input from an untrusted file, like every
+  // other state.json field: all-or-nothing, clamped, enums checked. Anything
+  // off and the cache is ignored, leaving a fresh probe to fill it in.
+  function applyHwCache(v) {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return
+    var w = String(v.working || "")
+    if (w.length > 32) return
+    var ven = String(v.vendor || "unknown")
+    if (["intel", "amd", "nvidia", "hybrid", "unknown"].indexOf(ven) === -1) return
+    var reason = String(v.reason || "")
+    if (reason.length > 512) return
+    var be = v.backends
+    if (!be || typeof be !== "object" || Array.isArray(be)) return
+    var states = ["ok", "fail", "skipped", "unknown"]
+    var va = String(be.vaapi || "unknown"), cu = String(be.cuda || "unknown")
+    if (states.indexOf(va) === -1 || states.indexOf(cu) === -1) return
+    var sup = []
+    if (Array.isArray(v.supported)) {
+      for (var i = 0; i < v.supported.length && sup.length < 32; i++) {
+        var s = String(v.supported[i] || "")
+        if (s !== "" && s.length <= 32) sup.push(s)
+      }
+    }
+    var at = Number(v.at || 0)
+    if (!(at > 0)) at = 0
+    root.hwSupported = sup
+    root.hwWorking = w
+    root.hwVendor = ven
+    root.hwBackends = { vaapi: va, cuda: cu }
+    root.hwReason = reason
+    root.hwProbedAt = at
+    root.hwFromCache = true
+    root.hwChecked = true
+  }
+
+  // Fresh enough to skip the startup probe: answered instantly from state,
+  // with the first explicit hwaccel query refreshing in the background.
+  function hwCacheFresh() {
+    return root.hwChecked && root.hwProbedAt > 0 &&
+           (Date.now() - root.hwProbedAt) < root.hwCacheTtlMs
+  }
 
   readonly property string hwProbeScript:
     'sup=$(ffmpeg -hide_banner -hwaccels 2>/dev/null | tail -n +2 | tr "\\n" "," | sed "s/,$//"); echo "SUPPORTED=$sup"; ' +
@@ -990,6 +1051,7 @@ Item {
       root.hwVendor = "unknown"
       root.hwBackends = ({})
       root.hwReason = "probe timed out — assuming software decode"
+      root.hwProbedAt = 0   // never cache a timeout: retry next start
       root.hwChecked = true
       return
     }
@@ -1071,20 +1133,30 @@ Item {
       root.hwWorking = ""
       root.hwReason = "VAAPI init failed — software decode"
     }
+    root.hwProbedAt = Date.now()
     root.hwChecked = true
+    // Save the probe with the state so the next start answers from cache.
+    // Guarded on load: a probe finishing before state.json did must not
+    // persist defaults over the real state.
+    if (root._stateLoaded) root.persistState()
   }
 
   Process {
     id: hwProbeProc
-    command: root.timeoutPrefix.concat(["bash", "-c", root.hwProbeScript])
+    // Structurally bounded output (eight short echo lines), but capped
+    // explicitly like every other read: StdioCollector has no size limit of
+    // its own, and a truncated tail still parses — missing keys fall back to
+    // the generic software-decode reason.
+    command: root.timeoutPrefix.concat(["bash", "-c", root.hwProbeScript + " | head -c 4096"])
     stdout: StdioCollector {
       onStreamFinished: root.parseHwProbe(text)
     }
     onExited: if (!root.hwChecked) root.parseHwProbe("")
   }
 
-  // Probe shortly after startup: cheap and off the state-load critical path.
-  Timer { interval: 900; running: true; repeat: false; onTriggered: root.refreshHwAccel() }
+  // Probe shortly after startup unless a fresh cache already answered: cheap
+  // and off the state-load critical path either way.
+  Timer { interval: 900; running: true; repeat: false; onTriggered: if (!root.hwCacheFresh()) root.refreshHwAccel() }
 
   // ---------------------------------------------------------------- render
   Variants {
@@ -1710,9 +1782,11 @@ Item {
     }
 
     // HW decode probe: which backends ffmpeg lists, whether VAAPI init works,
-    // and why software fallback is in effect. Re-probes when never checked.
+    // and why software fallback is in effect. Re-probes when never checked, or
+    // once per session when serving a cached result — the cached answer returns
+    // immediately either way, the probe refreshes it in the background.
     function hwaccel(): string {
-      if (!root.hwChecked) root.refreshHwAccel()
+      if (!root.hwChecked || root.hwFromCache) { root.hwFromCache = false; root.refreshHwAccel() }
       return JSON.stringify(root.hwStatusObject())
     }
 
