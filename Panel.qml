@@ -356,7 +356,7 @@ Item {
                && panel.service.enabled === true && panel.service.rendering === true
       width: parent.width
       text: "Software decode — high CPU" + (panel.service && panel.service.hwReason !== "" ? ": " + panel.service.hwReason : "")
-      color: "#e5c07b"
+      color: Color.urgent
       font.family: panel.fontFamily
       font.pixelSize: Style.font.bodySmall
       wrapMode: Text.WordWrap

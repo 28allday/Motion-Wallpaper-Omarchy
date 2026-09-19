@@ -979,7 +979,7 @@ Item {
   function applyHwCache(v) {
     if (!v || typeof v !== "object" || Array.isArray(v)) return
     var w = String(v.working || "")
-    if (w.length > 32) return
+    if (["", "vaapi", "cuda"].indexOf(w) === -1) return
     var ven = String(v.vendor || "unknown")
     if (["intel", "amd", "nvidia", "hybrid", "unknown"].indexOf(ven) === -1) return
     var reason = String(v.reason || "")
@@ -1147,7 +1147,7 @@ Item {
     // explicitly like every other read: StdioCollector has no size limit of
     // its own, and a truncated tail still parses — missing keys fall back to
     // the generic software-decode reason.
-    command: root.timeoutPrefix.concat(["bash", "-c", root.hwProbeScript + " | head -c 4096"])
+    command: root.timeoutPrefix.concat(["bash", "-c", "{ " + root.hwProbeScript + "; } | head -c 4096"])
     stdout: StdioCollector {
       onStreamFinished: root.parseHwProbe(text)
     }
